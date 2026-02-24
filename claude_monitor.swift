@@ -2,6 +2,28 @@ import Cocoa
 import SwiftUI
 import Combine
 
+// MARK: - NSBezierPath CGPath Extension
+
+extension NSBezierPath {
+    var cgPath: CGPath {
+        let path = CGMutablePath()
+        var points = [CGPoint](repeating: .zero, count: 3)
+        for i in 0..<elementCount {
+            let type = element(at: i, associatedPoints: &points)
+            switch type {
+            case .moveTo: path.move(to: points[0])
+            case .lineTo: path.addLine(to: points[0])
+            case .curveTo: path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .cubicCurveTo: path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .quadraticCurveTo: path.addQuadCurve(to: points[1], control: points[0])
+            case .closePath: path.closeSubpath()
+            @unknown default: break
+            }
+        }
+        return path
+    }
+}
+
 // MARK: - Config Manager
 
 struct MonitorConfig: Codable {
@@ -1524,6 +1546,192 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.panel.savePosition()
         }
+    }
+}
+
+// MARK: - Click Guide Animator
+
+class ClickGuideAnimator {
+    var overlayWindow: NSWindow?
+    var eventMonitor: Any?
+    var cleanupWorkItem: DispatchWorkItem?
+
+    func animate(from fromPoint: NSPoint, to targetFrame: NSRect, color: NSColor) {
+        cleanup()
+
+        // Create overlay covering all screens
+        let unionFrame = NSScreen.screens.reduce(NSRect.zero) { $0.union($1.frame) }
+        let window = NSWindow(
+            contentRect: unionFrame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.level = .screenSaver
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let contentView = NSView(frame: NSRect(origin: .zero, size: unionFrame.size))
+        contentView.wantsLayer = true
+        window.contentView = contentView
+        self.overlayWindow = window
+
+        // Convert coordinates to local overlay space
+        let localFrom = NSPoint(
+            x: fromPoint.x - unionFrame.origin.x,
+            y: fromPoint.y - unionFrame.origin.y
+        )
+        let localTarget = NSRect(
+            x: targetFrame.origin.x - unionFrame.origin.x,
+            y: targetFrame.origin.y - unionFrame.origin.y,
+            width: targetFrame.width,
+            height: targetFrame.height
+        )
+        let targetCenter = NSPoint(
+            x: localTarget.midX,
+            y: localTarget.midY
+        )
+
+        // Create orb layer (radial gradient)
+        let orbSize: CGFloat = 50
+        let orbLayer = CAGradientLayer()
+        orbLayer.type = .radial
+        orbLayer.colors = [
+            color.withAlphaComponent(0.8).cgColor,
+            color.withAlphaComponent(0.0).cgColor
+        ]
+        orbLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        orbLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
+        orbLayer.bounds = CGRect(x: 0, y: 0, width: orbSize, height: orbSize)
+        orbLayer.cornerRadius = orbSize / 2
+        orbLayer.position = localFrom
+        contentView.layer?.addSublayer(orbLayer)
+
+        // Create border layer (hidden initially)
+        let borderLayer = CAShapeLayer()
+        let borderPath = NSBezierPath(
+            roundedRect: localTarget,
+            xRadius: 10,
+            yRadius: 10
+        )
+        borderLayer.path = borderPath.cgPath
+        borderLayer.strokeColor = color.withAlphaComponent(0.8).cgColor
+        borderLayer.lineWidth = 3
+        borderLayer.fillColor = nil
+        borderLayer.opacity = 0
+        contentView.layer?.addSublayer(borderLayer)
+
+        // Show overlay
+        window.orderFrontRegardless()
+
+        // Build flight path with slight arc
+        let dx = targetCenter.x - localFrom.x
+        let dy = targetCenter.y - localFrom.y
+        let midX = (localFrom.x + targetCenter.x) / 2
+        let midY = (localFrom.y + targetCenter.y) / 2
+        let distance = sqrt(dx * dx + dy * dy)
+        let offset = distance * 0.15
+        // Perpendicular direction
+        let perpX = -dy / (distance == 0 ? 1 : distance)
+        let perpY = dx / (distance == 0 ? 1 : distance)
+        let controlPoint = CGPoint(
+            x: midX + perpX * offset,
+            y: midY + perpY * offset
+        )
+
+        let flightPath = CGMutablePath()
+        flightPath.move(to: localFrom)
+        flightPath.addQuadCurve(to: targetCenter, control: controlPoint)
+
+        // Animate orb flight (~300ms)
+        let flightAnim = CAKeyframeAnimation(keyPath: "position")
+        flightAnim.path = flightPath
+        flightAnim.duration = 0.3
+        flightAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        flightAnim.fillMode = .forwards
+        flightAnim.isRemovedOnCompletion = false
+        orbLayer.add(flightAnim, forKey: "flight")
+
+        // After flight completes, dissolve orb and pulse border
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard self?.overlayWindow != nil else { return }
+
+            // Orb dissolve: scale 1→3 and opacity 1→0
+            let scaleAnim = CABasicAnimation(keyPath: "transform.scale")
+            scaleAnim.fromValue = 1.0
+            scaleAnim.toValue = 3.0
+
+            let fadeAnim = CABasicAnimation(keyPath: "opacity")
+            fadeAnim.fromValue = 1.0
+            fadeAnim.toValue = 0.0
+
+            let dissolveGroup = CAAnimationGroup()
+            dissolveGroup.animations = [scaleAnim, fadeAnim]
+            dissolveGroup.duration = 0.4
+            dissolveGroup.fillMode = .forwards
+            dissolveGroup.isRemovedOnCompletion = false
+            orbLayer.add(dissolveGroup, forKey: "dissolve")
+
+            // Border pulse: fade in then pulse then fade out
+            let fadeIn = CABasicAnimation(keyPath: "opacity")
+            fadeIn.fromValue = 0.0
+            fadeIn.toValue = 1.0
+            fadeIn.duration = 0.15
+            fadeIn.beginTime = 0
+            fadeIn.fillMode = .forwards
+
+            let pulse = CAKeyframeAnimation(keyPath: "opacity")
+            pulse.values = [1.0, 0.3, 1.0, 0.0]
+            pulse.duration = 0.8
+            pulse.beginTime = 0.15
+            pulse.fillMode = .forwards
+
+            let borderGroup = CAAnimationGroup()
+            borderGroup.animations = [fadeIn, pulse]
+            borderGroup.duration = 0.95
+            borderGroup.fillMode = .forwards
+            borderGroup.isRemovedOnCompletion = false
+            borderLayer.add(borderGroup, forKey: "pulse")
+        }
+
+        // Register global event monitor for early cancellation
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .keyDown]
+        ) { [weak self] _ in
+            self?.cancelWithFade()
+        }
+
+        // Auto-cleanup after 1.3s
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.cleanup()
+        }
+        self.cleanupWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: workItem)
+    }
+
+    private func cancelWithFade() {
+        cleanupWorkItem?.cancel()
+        if let window = overlayWindow {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.1
+                window.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                self?.cleanup()
+            })
+        }
+    }
+
+    func cleanup() {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+        overlayWindow?.orderOut(nil)
+        overlayWindow = nil
+        cleanupWorkItem?.cancel()
+        cleanupWorkItem = nil
     }
 }
 
