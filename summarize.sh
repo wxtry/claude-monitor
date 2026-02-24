@@ -38,6 +38,13 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
+# Read optional proxy from config
+PROXY=$(jq -r '.summary.proxy // empty' "$CONFIG_FILE")
+CURL_PROXY_ARGS=()
+if [ -n "$PROXY" ]; then
+    CURL_PROXY_ARGS=(--proxy "$PROXY")
+fi
+
 # Load GEMINI_API_KEY from env file
 set -a
 source "$ENV_FILE"
@@ -68,10 +75,12 @@ print(json.dumps(body))
 " "$SYSTEM_PROMPT" "$PROMPTS")
 
 # --- Call Gemini API ---
-API_URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}"
+API_URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
 
 RESPONSE=$(curl -s --max-time 10 -X POST "$API_URL" \
     -H "Content-Type: application/json" \
+    -H "X-goog-api-key: ${GEMINI_API_KEY}" \
+    "${CURL_PROXY_ARGS[@]}" \
     -d "$REQUEST_JSON")
 
 # --- Parse response with python3 ---
