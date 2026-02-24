@@ -1282,12 +1282,19 @@ struct MonitorContentView: View {
                         ForEach(reader.sessions) { session in
                             Button {
                                 let mouseLocation = NSEvent.mouseLocation
-                                if let targetFrame = getTerminalWindowFrame(session: session) {
-                                    guideAnimator.animate(
-                                        from: mouseLocation,
-                                        to: targetFrame,
-                                        color: session.statusNSColor
-                                    )
+                                let sessionCopy = session
+                                let animator = guideAnimator
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let targetFrame = getTerminalWindowFrame(session: sessionCopy)
+                                    DispatchQueue.main.async {
+                                        if let frame = targetFrame {
+                                            animator.animate(
+                                                from: mouseLocation,
+                                                to: frame,
+                                                color: sessionCopy.statusNSColor
+                                            )
+                                        }
+                                    }
                                 }
                                 switchToSession(session)
                             } label: {
