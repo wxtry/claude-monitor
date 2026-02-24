@@ -46,9 +46,15 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - Built-in voice picker — browse your ElevenLabs library or paste any voice ID
 - Per-event toggles and volume in `config.json`
 
+**AI session titles**
+- Automatically generates short descriptive titles for each session via Gemini API
+- Replaces generic folder names with context-aware summaries (e.g. "部署监控面板" instead of "claude-monitor")
+- Titles appear once enough conversation context accumulates (~1k tokens)
+- Refresh button regenerates titles on demand
+
 **See everything**
 - Live status for every session: starting, working, done, or needs attention
-- Project name, elapsed time, and last prompt preview
+- AI-generated title (or project name as fallback), elapsed time, and last prompt preview
 - Color-coded status dots (pulsing cyan = working, orange = attention, green = done)
 - Stale sessions automatically gray out after 10 minutes
 
@@ -104,12 +110,13 @@ Download the files from this repo and place them:
 | `claude_monitor.swift` | `~/.claude/monitor/claude_monitor.swift` |
 | `build.sh` | `~/.claude/monitor/build.sh` |
 | `config.json` | `~/.claude/monitor/config.json` |
+| `summarize.sh` | `~/.claude/monitor/summarize.sh` |
 | `monitor.sh` | `~/.claude/hooks/monitor.sh` |
 
 Make the scripts executable:
 
 ```bash
-chmod +x ~/.claude/monitor/build.sh ~/.claude/hooks/monitor.sh
+chmod +x ~/.claude/monitor/build.sh ~/.claude/monitor/summarize.sh ~/.claude/hooks/monitor.sh
 ```
 
 #### 4. Configure hooks
@@ -226,6 +233,37 @@ You can also browse your existing ElevenLabs voice library from the voice picker
 
 The included voice design prompt creates a warm, softly synthetic voice — like a machine that genuinely cares. You can customize it in `config.json` under `elevenlabs.voice_design_prompt`.
 
+## AI Session Titles
+
+Claude Monitor can automatically generate short, descriptive titles for each session using the Gemini API. Instead of seeing folder names like "claude-monitor", you'll see titles like "部署监控面板" or "修复登录验证".
+
+### Setup
+
+1. Get a free API key at [Google AI Studio](https://aistudio.google.com/apikey)
+2. Add it to `~/.env`:
+   ```
+   GEMINI_API_KEY=your_key_here
+   ```
+3. The feature is enabled by default in `config.json`. If you need a proxy (e.g. in China), add it:
+   ```json
+   {
+     "summary": {
+       "enabled": true,
+       "env_file": "~/.env",
+       "model": "gemini-2.0-flash",
+       "threshold_chars": 4000,
+       "proxy": "socks5://127.0.0.1:1080"
+     }
+   }
+   ```
+
+### How it works
+
+- When accumulated prompts in a session exceed ~1k tokens (4000 chars), a title is auto-generated once
+- After that, titles only update when you click **Refresh sessions** in the settings popover
+- If the API is unavailable or not configured, the project folder name is shown as fallback
+- The `summarize.sh` script handles the API call — swap it out to use a different LLM provider
+
 ### Volume and toggles
 
 | Setting | Default | Description |
@@ -243,6 +281,7 @@ The included voice design prompt creates a warm, softly synthetic voice — like
 - **Xcode Command Line Tools** — `xcode-select --install` (for the Swift compiler)
 - **jq** — `brew install jq` (for JSON processing in the hook script)
 - **Terminal.app or iTerm2**
+- (Optional) [Google Gemini](https://aistudio.google.com/apikey) API key for AI session titles
 - (Optional) [ElevenLabs](https://elevenlabs.io) API key for AI voices
 
 ## How It Works
@@ -300,7 +339,14 @@ Full config reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
     "on_start": false,
     "volume": 0.5
   },
-  "voices": []
+  "voices": [],
+  "summary": {
+    "enabled": true,
+    "env_file": "~/.env",
+    "model": "gemini-2.0-flash",
+    "threshold_chars": 4000,
+    "proxy": ""
+  }
 }
 ```
 
@@ -312,6 +358,7 @@ See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for detailed solutions. Qui
 |---------|-----|
 | Sessions don't appear | Send a new prompt in that session to trigger the hook |
 | Click doesn't switch tabs | Check that `terminal_session_id` is set in the session JSON |
+| Titles not generating | Check `GEMINI_API_KEY` in `~/.env`, verify `summary.enabled` is `true`, check proxy if needed |
 | No voice | Verify `announce.enabled` is `true` and `volume` > `0` |
 | Wrong voice | Run `say -v '?'` to find the exact voice name, update `say.voice` |
 | Panel gone | `pkill -9 claude_monitor && ~/.claude/monitor/build.sh` |
@@ -335,7 +382,8 @@ Then remove the 5 hook entries (`SessionStart`, `UserPromptSubmit`, `Stop`, `Not
 │   ├── claude_monitor.swift   # SwiftUI floating panel (~900 lines)
 │   ├── claude_monitor          # Compiled binary (after build)
 │   ├── build.sh               # Compile + launch script
-│   ├── config.json            # TTS + announcement config
+│   ├── summarize.sh           # AI title generator (calls Gemini API)
+│   ├── config.json            # TTS, announcement + summary config
 │   └── sessions/              # Session JSON files (auto-managed)
 ├── hooks/
 │   └── monitor.sh            # Hook script — lifecycle events + TTS

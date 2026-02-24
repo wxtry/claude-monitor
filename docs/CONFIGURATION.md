@@ -26,7 +26,14 @@ All configuration lives in `~/.claude/monitor/config.json`. Changes are picked u
     "on_start": false,
     "volume": 0.5
   },
-  "voices": []
+  "voices": [],
+  "summary": {
+    "enabled": true,
+    "env_file": "~/.env",
+    "model": "gemini-2.0-flash",
+    "threshold_chars": 4000,
+    "proxy": ""
+  }
 }
 ```
 
@@ -76,6 +83,22 @@ Controls when and how voice announcements are made.
 | `on_start` | boolean | `false` | Announce when a new session starts |
 | `volume` | number | `0.5` | Announcement volume from `0.0` (silent) to `1.0` (full system volume) |
 
+### `summary`
+
+AI-generated session title configuration. Titles are generated via Gemini API when accumulated prompts exceed the character threshold.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable/disable AI title generation |
+| `env_file` | string | `"~/.env"` | Path to file containing `GEMINI_API_KEY` (supports `~`) |
+| `model` | string | `"gemini-2.0-flash"` | Gemini model to use. Free tier recommended |
+| `threshold_chars` | number | `4000` | Accumulated prompt character count before auto-generating a title (~1k tokens) |
+| `proxy` | string | `""` | Proxy for Gemini API calls (e.g. `"socks5://127.0.0.1:1080"`). Leave empty for direct connection |
+
+Titles are generated once automatically when the threshold is reached. After that, click **Refresh sessions** in the settings popover to regenerate. If the API is unavailable, the project folder name is shown as fallback.
+
+The actual API call is handled by `~/.claude/monitor/summarize.sh` — a standalone script that reads config, calls Gemini, and outputs the title to stdout. Replace this script to use a different LLM provider.
+
 ### `voices`
 
 Array of saved voices that appear in the settings voice picker. Voices are added here automatically when you generate a voice, paste a voice ID, or select from your library.
@@ -89,6 +112,16 @@ Array of saved voices that appear in the settings voice picker. Voices are added
 ```
 
 The voice picker shows these saved voices **plus** any voices from your ElevenLabs library (fetched via API on launch). Saved voices always appear first.
+
+## Gemini API Key
+
+Get a free key at [Google AI Studio](https://aistudio.google.com/apikey) and add it to your `.env` file:
+
+```
+GEMINI_API_KEY=your_key_here
+```
+
+Point to it with `summary.env_file` in config.json. If direct access to Google APIs is blocked in your region, set `summary.proxy` to a SOCKS5 or HTTP proxy.
 
 ## ElevenLabs `.env` File
 
