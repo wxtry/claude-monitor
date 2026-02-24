@@ -1,0 +1,89 @@
+#!/bin/bash
+# summarize.sh — Generate a short Chinese title for Claude session prompts
+# Called by Claude Monitor Swift app via Process()
+# Reads prompts from stdin, outputs title to stdout
+#
+# Config: ~/.claude/monitor/config.json
+#   summary.enabled    — must be true
+#   summary.env_file   — path to file containing GEMINI_API_KEY
+#   summary.model      — Gemini model name (e.g. gemini-2.0-flash)
+
+set -euo pipefail
+
+# --- Config ---
+CONFIG_FILE="$HOME/.claude/monitor/config.json"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    exit 1
+fi
+
+# Check if summary is enabled
+ENABLED=$(jq -r '.summary.enabled // false' "$CONFIG_FILE")
+if [ "$ENABLED" != "true" ]; then
+    exit 1
+fi
+
+# Read model and env file path from config
+MODEL=$(jq -r '.summary.model // empty' "$CONFIG_FILE")
+ENV_FILE=$(jq -r '.summary.env_file // empty' "$CONFIG_FILE")
+
+if [ -z "$MODEL" ] || [ -z "$ENV_FILE" ]; then
+    exit 1
+fi
+
+# Expand ~ in env file path
+ENV_FILE="${ENV_FILE/#\~/$HOME}"
+
+if [ ! -f "$ENV_FILE" ]; then
+    exit 1
+fi
+
+# Load GEMINI_API_KEY from env file
+set -a
+source "$ENV_FILE"
+set +a
+
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+    exit 1
+fi
+
+# --- Read prompts from stdin ---
+PROMPTS=$(cat)
+if [ -z "$PROMPTS" ]; then
+    exit 1
+fi
+
+# --- Build request JSON with python3 ---
+SYSTEM_PROMPT="Summarize the following user prompts into a short title (4-8 Chinese words). Output ONLY the title, nothing else."
+
+REQUEST_JSON=$(python3 -c "
+import json, sys
+system_prompt = sys.argv[1]
+user_text = sys.argv[2]
+body = {
+    'contents': [{'role': 'user', 'parts': [{'text': system_prompt + '\n\n' + user_text}]}],
+    'generationConfig': {'maxOutputTokens': 30, 'temperature': 0.1}
+}
+print(json.dumps(body))
+" "$SYSTEM_PROMPT" "$PROMPTS")
+
+# --- Call Gemini API ---
+API_URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}"
+
+RESPONSE=$(curl -s --max-time 10 -X POST "$API_URL" \
+    -H "Content-Type: application/json" \
+    -d "$REQUEST_JSON")
+
+# --- Parse response with python3 ---
+TITLE=$(python3 -c "
+import json, sys
+resp = json.loads(sys.argv[1])
+text = resp['candidates'][0]['content']['parts'][0]['text']
+print(text.strip())
+" "$RESPONSE")
+
+if [ -z "$TITLE" ]; then
+    exit 1
+fi
+
+echo "$TITLE"
