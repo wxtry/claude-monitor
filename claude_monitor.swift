@@ -870,21 +870,24 @@ func moveTerminalWindow(session: SessionInfo, to rect: NSRect) {
 /// `sessions` should be in display order (same as list). `panelFrame` is the Monitor panel's frame in AppKit coords.
 func stackWindows(sessions: [SessionInfo], panelFrame: NSRect) {
     let cascadeOffset: CGFloat = 30
+    let screenFrame = NSScreen.main?.visibleFrame ?? .zero
 
-    // Anchor: right-top corner of the panel, starting just below the panel
+    // Anchor point: panel's bottom-right corner in AppKit coords.
+    // Windows cascade downward from here (panel bottom = window top boundary).
     let anchorRight = panelFrame.maxX
-    let anchorTop = panelFrame.origin.y  // AppKit: origin.y is the bottom of the panel = top anchor for windows below
+    let anchorY = panelFrame.origin.y  // panel's bottom edge in AppKit (windows start below this)
 
     for (index, session) in sessions.enumerated() {
+        // Skip sessions without terminal info (avoids unnecessary AppleScript call)
         guard !session.terminal.isEmpty, !session.terminal_session_id.isEmpty else { continue }
 
         // Get current window size (keep original size)
         guard let currentFrame = getTerminalWindowFrame(session: session) else { continue }
 
         let offset = CGFloat(index) * cascadeOffset
-        // Right-top aligned: right edge matches anchorRight - offset, top edge matches anchorTop - offset
-        let newX = anchorRight - currentFrame.width - offset
-        let newY = anchorTop - currentFrame.height - offset  // AppKit: y is bottom edge
+        // Right edge aligned to anchor, each window shifts left and down
+        let newX = max(screenFrame.minX, anchorRight - currentFrame.width - offset)
+        let newY = max(screenFrame.minY, anchorY - currentFrame.height - offset)
 
         let newRect = NSRect(x: newX, y: newY, width: currentFrame.width, height: currentFrame.height)
         moveTerminalWindow(session: session, to: newRect)
