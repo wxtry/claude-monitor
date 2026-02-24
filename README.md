@@ -155,6 +155,13 @@ Add the following to your `~/.claude/settings.json`. If you already have a `"hoo
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/monitor.sh PostToolUse" }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
@@ -311,6 +318,7 @@ Each Claude Code lifecycle event maps to a session status:
 | You send a prompt | `working` | No |
 | Claude finishes | `done` | Yes |
 | Claude needs permission | `attention` | Yes |
+| You grant permission | `working` | No |
 | You exit Claude Code | Removed after 5s | No |
 | Terminal tab closed | Auto-removed | No |
 

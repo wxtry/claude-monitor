@@ -341,6 +341,7 @@ struct SessionInfo: Codable, Identifiable {
     }
 
     var isStale: Bool {
+        guard status != "done" && status != "attention" else { return false }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var date = formatter.date(from: updated_at)
@@ -372,7 +373,7 @@ class SessionReader: ObservableObject {
     private var promptAccumulator: [String: String] = [:]
     private var lastSeenPrompt: [String: String] = [:]
     private var titleGenerated: Set<String> = []
-    private var summarizeInFlight: Set<String> = []
+    @Published var summarizeInFlight: Set<String> = []
     private var configManager: ConfigManager?
 
     func setConfigManager(_ cm: ConfigManager) {
@@ -498,14 +499,22 @@ class SessionReader: ObservableObject {
                 && !titleGenerated.contains(sessionId)
                 && !summarizeInFlight.contains(sessionId) {
                 summarizeInFlight.insert(sessionId)
-                runSummarize(sessionId: sessionId, promptText: accumulated)
+                let session = sessions.first { $0.session_id == sessionId }
+                runSummarize(sessionId: sessionId, promptText: accumulated, project: session?.project ?? "", cwd: session?.cwd ?? "")
             }
         }
     }
 
-    func runSummarize(sessionId: String, promptText: String) {
+    func runSummarize(sessionId: String, promptText: String, project: String = "", cwd: String = "") {
         let scriptPath = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.claude/monitor/summarize.sh"
         let sessionFilePath = "\(sessionsDir)/\(sessionId).json"
+
+        // Build context: project info + prompts
+        var input = ""
+        if !project.isEmpty || !cwd.isEmpty {
+            input += "Project: \(project) (\(cwd))\n---\n"
+        }
+        input += promptText
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
@@ -522,7 +531,7 @@ class SessionReader: ObservableObject {
 
             do {
                 try task.run()
-                inputPipe.fileHandleForWriting.write(promptText.data(using: .utf8) ?? Data())
+                inputPipe.fileHandleForWriting.write(input.data(using: .utf8) ?? Data())
                 inputPipe.fileHandleForWriting.closeFile()
                 task.waitUntilExit()
 
@@ -560,7 +569,7 @@ class SessionReader: ObservableObject {
             guard !summarizeInFlight.contains(session.session_id) else { continue }
             summarizeInFlight.insert(session.session_id)
             titleGenerated.remove(session.session_id)
-            runSummarize(sessionId: session.session_id, promptText: accumulated)
+            runSummarize(sessionId: session.session_id, promptText: accumulated, project: session.project, cwd: session.cwd)
         }
     }
 
@@ -589,15 +598,30 @@ class SessionReader: ObservableObject {
         task.arguments = ["-c", """
         SESSIONS_DIR="$HOME/.claude/monitor/sessions"
         NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        for pid in $(ps -eo pid=,comm= | awk '/claude/ && !/claude_monitor/ && !/awk/ {print $1}'); do
+        CLAUDE_PIDS=$(ps -eo pid=,comm= | awk '/claude/ && !/claude_monitor/ && !/awk/ {print $1}')
+        for pid in $CLAUDE_PIDS; do
             tty_name=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
             [ -z "$tty_name" ] || [ "$tty_name" = "??" ] && continue
-            grep -rlq "/dev/$tty_name" "$SESSIONS_DIR" 2>/dev/null && continue
+            grep -rlq "$tty_name" "$SESSIONS_DIR" 2>/dev/null && continue
             cwd=$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | tail -1 | cut -c2-)
             [ -z "$cwd" ] && continue
             project=$(basename "$cwd")
             sid="discovered-${tty_name}"
             jq -n --arg sid "$sid" --arg project "$project" --arg cwd "$cwd" --arg term_sid "/dev/$tty_name" --arg now "$NOW" '{session_id:$sid,status:"working",project:$project,cwd:$cwd,terminal:"terminal",terminal_session_id:$term_sid,started_at:$now,updated_at:$now,last_prompt:""}' > "$SESSIONS_DIR/$sid.json.tmp" && mv "$SESSIONS_DIR/$sid.json.tmp" "$SESSIONS_DIR/$sid.json"
+        done
+        for f in "$SESSIONS_DIR"/*.json; do
+            [ -f "$f" ] || continue
+            tty=$(jq -r '.terminal_session_id // empty' "$f" 2>/dev/null)
+            [ -z "$tty" ] && continue
+            tty_pids=$(lsof -t "$tty" 2>/dev/null)
+            has_claude=false
+            for cpid in $CLAUDE_PIDS; do
+                echo "$tty_pids" | grep -qw "$cpid" && { has_claude=true; break; }
+            done
+            if [ "$has_claude" = "false" ]; then
+                status=$(jq -r '.status // empty' "$f" 2>/dev/null)
+                [ "$status" = "working" ] || [ "$status" = "starting" ] && rm -f "$f"
+            fi
         done
         """]
         try? task.run()
@@ -769,10 +793,27 @@ struct PulsingDot: View {
     }
 }
 
+struct SpinnerView: View {
+    @State private var rotation: Double = 0
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.7)
+            .stroke(Color.white.opacity(0.5), lineWidth: 1.5)
+            .rotationEffect(.degrees(rotation))
+            .onAppear {
+                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
+                    rotation = 360
+                }
+            }
+    }
+}
+
 // MARK: - Session Row View
 
 struct SessionRowView: View {
     let session: SessionInfo
+    var isSummarizing: Bool = false
     var onKill: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var isKilling = false
@@ -786,6 +827,10 @@ struct SessionRowView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
+                    if isSummarizing {
+                        SpinnerView()
+                            .frame(width: 10, height: 10)
+                    }
                     Text(session.displayName)
                         .font(.system(size: 12, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
@@ -1138,7 +1183,7 @@ struct MonitorContentView: View {
                             Button {
                                 switchToSession(session)
                             } label: {
-                                SessionRowView(session: session, onKill: { killSession(session) })
+                                SessionRowView(session: session, isSummarizing: reader.summarizeInFlight.contains(session.session_id), onKill: { killSession(session) })
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)

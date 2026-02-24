@@ -70,7 +70,7 @@ case "$SYS_LANG" in
 esac
 
 # --- Build request JSON with python3 ---
-SYSTEM_PROMPT="Below are user prompts from a coding session. Infer the overall project goal (not the latest small task) and write a short title (4-8 words) ${LANG_INSTRUCTION}. Output ONLY the title, nothing else."
+SYSTEM_PROMPT="You will receive context from a coding session: project name, working directory, and user prompts. Infer what this project/repo is fundamentally about — its purpose, not the user's current action. Write a concise title (4-8 words) ${LANG_INSTRUCTION} describing the project's core purpose. If the project name or path already reveals the purpose, use that. Ignore transient actions like 'sync', 'push', 'fix typo'. Output ONLY the title, nothing else."
 
 REQUEST_JSON=$(python3 -c "
 import json, sys

@@ -309,6 +309,22 @@ case "$EVENT" in
         fi
         ;;
 
+    PostToolUse)
+        # After tool execution, if status was "attention" (permission just granted), set back to "working"
+        TARGET="$SESSION_FILE"
+        if [ ! -f "$TARGET" ]; then
+            TARGET=$(find_existing_session)
+        fi
+        if [ -n "$TARGET" ] && [ -f "$TARGET" ]; then
+            current_status=$(jq -r '.status' "$TARGET" 2>/dev/null)
+            if [ "$current_status" = "attention" ]; then
+                jq --arg status "working" --arg updated "$NOW" \
+                    '.status = $status | .updated_at = $updated' \
+                    "$TARGET" > "${TARGET}.tmp" && mv "${TARGET}.tmp" "$TARGET"
+            fi
+        fi
+        ;;
+
     SessionEnd)
         if [ -f "$SESSION_FILE" ]; then
             (sleep 5 && rm -f "$SESSION_FILE") &
