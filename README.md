@@ -60,6 +60,8 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 
 **Stay in flow**
 - Click any row to jump to that terminal tab instantly (Terminal.app + iTerm2)
+- **Visual click guide** — a light orb flies from the click position to the target terminal window, with a glowing border pulse on arrival, so your eyes follow naturally
+- Works across multiple screens — the orb exits one screen and enters the other
 - Kill any session with one click (hover to reveal the X)
 - Dead sessions auto-removed when the terminal tab closes
 - Discover missing sessions with the refresh button
@@ -67,7 +69,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 **Designed to disappear**
 - Always-on-top dark glass panel, visible on all Spaces
 - No dock icon, doesn't steal focus from your terminal
-- Drag anywhere, position persists across restarts
+- Drag anywhere, resize from right edge, position persists across restarts
 - Thin custom scrollbar, minimal UI footprint
 
 ## Install
@@ -306,7 +308,7 @@ Swift app polls directory every 500ms, picks up changes
 Floating panel updates: status dot, project name, prompt preview, elapsed time
         |
         v
-Click row → AppleScript activates the right Terminal/iTerm2 tab
+Click row → light orb flies to target window + AppleScript activates the tab
 TTS → announces "project done" or "project needs attention"
 ```
 
