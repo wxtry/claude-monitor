@@ -1329,6 +1329,19 @@ struct HeaderBar: View {
                     .foregroundColor(.white.opacity(0.4))
 
                 Button {
+                    let panelFrame = NSApp.windows.first(where: { $0 is FloatingPanel })?.frame ?? .zero
+                    let orderedSessions = sessions
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        stackWindows(sessions: orderedSessions, panelFrame: panelFrame)
+                    }
+                } label: {
+                    Image(systemName: "rectangle.stack")
+                        .font(.system(size: 8))
+                        .foregroundColor(.white.opacity(0.2))
+                }
+                .buttonStyle(.plain)
+
+                Button {
                     showSettings.toggle()
                 } label: {
                     Image(systemName: "gearshape")
