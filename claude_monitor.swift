@@ -282,11 +282,12 @@ struct SessionInfo: Codable, Identifiable {
     var started_at: String
     var updated_at: String
     var last_prompt: String
+    var title: String
 
     var id: String { session_id }
 
     enum CodingKeys: String, CodingKey {
-        case session_id, status, project, cwd, terminal, terminal_session_id, started_at, updated_at, last_prompt
+        case session_id, status, project, cwd, terminal, terminal_session_id, started_at, updated_at, last_prompt, title
     }
 
     init(from decoder: Decoder) throws {
@@ -300,6 +301,7 @@ struct SessionInfo: Codable, Identifiable {
         started_at = (try? c.decode(String.self, forKey: .started_at)) ?? ""
         updated_at = (try? c.decode(String.self, forKey: .updated_at)) ?? ""
         last_prompt = (try? c.decode(String.self, forKey: .last_prompt)) ?? ""
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
     }
 
     var statusColor: Color {
@@ -348,6 +350,10 @@ struct SessionInfo: Codable, Identifiable {
         }
         guard let updated = date else { return false }
         return Date().timeIntervalSince(updated) > 600 // 10 minutes
+    }
+
+    var displayName: String {
+        title.isEmpty ? project : title
     }
 }
 
@@ -654,7 +660,7 @@ struct SessionRowView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Text(session.project)
+                    Text(session.displayName)
                         .font(.system(size: 12, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
                         .lineLimit(1)
