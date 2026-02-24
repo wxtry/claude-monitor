@@ -1329,7 +1329,7 @@ struct HeaderBar: View {
                     .foregroundColor(.white.opacity(0.4))
 
                 Button {
-                    let panelFrame = NSApp.windows.first(where: { $0 is FloatingPanel })?.frame ?? .zero
+                    guard let panelFrame = NSApp.windows.first(where: { $0 is FloatingPanel })?.frame else { return }
                     let orderedSessions = sessions
                     DispatchQueue.global(qos: .userInitiated).async {
                         stackWindows(sessions: orderedSessions, panelFrame: panelFrame)
@@ -1340,6 +1340,7 @@ struct HeaderBar: View {
                         .foregroundColor(.white.opacity(0.2))
                 }
                 .buttonStyle(.plain)
+                .help("Stack windows")
 
                 Button {
                     showSettings.toggle()
