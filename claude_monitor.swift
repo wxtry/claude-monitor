@@ -1167,6 +1167,7 @@ struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var configManager: ConfigManager
     @State private var isExpanded = true
+    @AppStorage("monitorWidth") private var panelWidth: Double = 280
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1199,8 +1200,14 @@ struct MonitorContentView: View {
                 .frame(maxHeight: 300)
             }
         }
-        .frame(width: 280)
+        .frame(width: max(200, min(panelWidth, 600)))
         .fixedSize(horizontal: false, vertical: true)
+        .overlay(alignment: .trailing) {
+            ResizeHandle(currentWidth: panelWidth) { newWidth in
+                panelWidth = newWidth
+            }
+            .frame(width: 6)
+        }
         .background(
             VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -1210,6 +1217,61 @@ struct MonitorContentView: View {
                 .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.3), radius: 10, y: 5)
+    }
+}
+
+struct ResizeHandle: NSViewRepresentable {
+    let currentWidth: Double
+    var onResize: (Double) -> Void
+
+    func makeNSView(context: Context) -> ResizeHandleNSView {
+        let view = ResizeHandleNSView()
+        view.onResize = onResize
+        view.startWidth = currentWidth
+        return view
+    }
+
+    func updateNSView(_ nsView: ResizeHandleNSView, context: Context) {
+        nsView.onResize = onResize
+        if !nsView.isDragging { nsView.startWidth = currentWidth }
+    }
+}
+
+class ResizeHandleNSView: NSView {
+    var onResize: ((Double) -> Void)?
+    var startWidth: Double = 280
+    var isDragging = false
+    private var dragOriginX: CGFloat = 0
+    private var trackingArea: NSTrackingArea?
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 6, height: NSView.noIntrinsicMetric) }
+
+    override func updateTrackingAreas() {
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(trackingArea!)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseEntered(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
+    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        dragOriginX = NSEvent.mouseLocation.x
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let delta = NSEvent.mouseLocation.x - dragOriginX
+        let newWidth = max(200, min(startWidth + Double(delta), 600))
+        onResize?(newWidth)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
     }
 }
 
