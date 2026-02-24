@@ -336,6 +336,16 @@ struct SessionInfo: Codable, Identifiable {
         }
     }
 
+    var statusNSColor: NSColor {
+        switch status {
+        case "starting":  return .gray
+        case "working":   return .cyan
+        case "done":      return .systemGreen
+        case "attention": return .orange
+        default:          return .gray
+        }
+    }
+
     var statusIcon: String {
         switch status {
         case "starting":  return "circle.dotted"
@@ -1256,6 +1266,7 @@ struct MonitorContentView: View {
     @ObservedObject var configManager: ConfigManager
     @State private var isExpanded = true
     @AppStorage("monitorWidth") private var panelWidth: Double = 280
+    private let guideAnimator = ClickGuideAnimator()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1270,6 +1281,14 @@ struct MonitorContentView: View {
                     VStack(spacing: 0) {
                         ForEach(reader.sessions) { session in
                             Button {
+                                let mouseLocation = NSEvent.mouseLocation
+                                if let targetFrame = getTerminalWindowFrame(session: session) {
+                                    guideAnimator.animate(
+                                        from: mouseLocation,
+                                        to: targetFrame,
+                                        color: session.statusNSColor
+                                    )
+                                }
                                 switchToSession(session)
                             } label: {
                                 SessionRowView(session: session, isSummarizing: reader.summarizeInFlight.contains(session.session_id), onKill: { killSession(session) })
