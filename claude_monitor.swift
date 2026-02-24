@@ -807,6 +807,65 @@ func getTerminalWindowFrame(session: SessionInfo) -> NSRect? {
     return NSRect(x: x, y: y, width: width, height: height)
 }
 
+// MARK: - Terminal Window Mover
+
+/// Moves a terminal window to the specified bounds (AppKit coordinates, bottom-left origin).
+/// Does not activate/focus the window.
+func moveTerminalWindow(session: SessionInfo, to rect: NSRect) {
+    guard !session.terminal.isEmpty, !session.terminal_session_id.isEmpty else { return }
+
+    // Convert AppKit coords (bottom-left origin) to AppleScript coords (top-left origin)
+    let screenHeight = NSScreen.screens.first?.frame.height ?? 0
+    let left = Int(rect.origin.x)
+    let top = Int(screenHeight - rect.origin.y - rect.height)
+    let right = Int(rect.origin.x + rect.width)
+    let bottom = Int(screenHeight - rect.origin.y)
+
+    let script: String
+
+    if session.terminal == "iterm2" {
+        let parts = session.terminal_session_id.split(separator: ":")
+        guard parts.count >= 2 else { return }
+        let uniqueId = String(parts[1])
+
+        script = """
+        tell application "iTerm2"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if unique id of s is "\(uniqueId)" then
+                            set bounds of w to {\(left), \(top), \(right), \(bottom)}
+                            return
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        """
+    } else if session.terminal == "terminal" {
+        let ttyPath = session.terminal_session_id
+
+        script = """
+        tell application "Terminal"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(ttyPath)" then
+                        set bounds of w to {\(left), \(top), \(right), \(bottom)}
+                        return
+                    end if
+                end repeat
+            end repeat
+        end tell
+        """
+    } else {
+        return
+    }
+
+    guard let appleScript = NSAppleScript(source: script) else { return }
+    var error: NSDictionary?
+    appleScript.executeAndReturnError(&error)
+}
+
 // MARK: - Session Killer
 
 func killSession(_ session: SessionInfo) {
