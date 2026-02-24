@@ -60,8 +60,17 @@ if [ -z "$PROMPTS" ]; then
     exit 1
 fi
 
+# --- Detect system language ---
+SYS_LANG=$(defaults read -g AppleLocale 2>/dev/null | cut -d'_' -f1)
+case "$SYS_LANG" in
+    zh) LANG_INSTRUCTION="用中文" ;;
+    ja) LANG_INSTRUCTION="日本語で" ;;
+    ko) LANG_INSTRUCTION="한국어로" ;;
+    *)  LANG_INSTRUCTION="in English" ;;
+esac
+
 # --- Build request JSON with python3 ---
-SYSTEM_PROMPT="Summarize the following user prompts into a short title (4-8 Chinese words). Output ONLY the title, nothing else."
+SYSTEM_PROMPT="Below are user prompts from a coding session. Infer the overall project goal (not the latest small task) and write a short title (4-8 words) ${LANG_INSTRUCTION}. Output ONLY the title, nothing else."
 
 REQUEST_JSON=$(python3 -c "
 import json, sys
