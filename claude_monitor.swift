@@ -369,6 +369,16 @@ class SessionReader: ObservableObject {
         return "\(home)/.claude/monitor/sessions"
     }()
 
+    private var promptAccumulator: [String: String] = [:]
+    private var lastSeenPrompt: [String: String] = [:]
+    private var titleGenerated: Set<String> = []
+    private var summarizeInFlight: Set<String> = []
+    private var configManager: ConfigManager?
+
+    func setConfigManager(_ cm: ConfigManager) {
+        self.configManager = cm
+    }
+
     init() {
         readSessions()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -443,9 +453,28 @@ class SessionReader: ObservableObject {
             do {
                 let session = try JSONDecoder().decode(SessionInfo.self, from: data)
                 loaded.append(session)
+
+                // Track prompt accumulation for title generation
+                if !session.last_prompt.isEmpty {
+                    let prev = self.lastSeenPrompt[session.session_id]
+                    if prev != session.last_prompt {
+                        self.lastSeenPrompt[session.session_id] = session.last_prompt
+                        let existing = self.promptAccumulator[session.session_id] ?? ""
+                        self.promptAccumulator[session.session_id] = existing + "\n" + session.last_prompt
+                    }
+                }
             } catch {
                 NSLog("[ClaudeMonitor] Failed to decode %@: %@", file, error.localizedDescription)
             }
+        }
+
+        // Clean up tracking for removed sessions
+        let activeIds = Set(loaded.map { $0.session_id })
+        for key in promptAccumulator.keys where !activeIds.contains(key) {
+            promptAccumulator.removeValue(forKey: key)
+            lastSeenPrompt.removeValue(forKey: key)
+            titleGenerated.remove(key)
+            summarizeInFlight.remove(key)
         }
 
         // Sort: attention first, then working, then starting, then done
@@ -454,6 +483,86 @@ class SessionReader: ObservableObject {
 
         DispatchQueue.main.async {
             self.sessions = loaded
+        }
+
+        // Check if any session needs auto-summarize
+        checkAutoSummarize()
+    }
+
+    private func checkAutoSummarize() {
+        guard let config = configManager?.config?.summary, config.enabled else { return }
+        let threshold = config.threshold_chars
+
+        for (sessionId, accumulated) in promptAccumulator {
+            if accumulated.count >= threshold
+                && !titleGenerated.contains(sessionId)
+                && !summarizeInFlight.contains(sessionId) {
+                summarizeInFlight.insert(sessionId)
+                runSummarize(sessionId: sessionId, promptText: accumulated)
+            }
+        }
+    }
+
+    func runSummarize(sessionId: String, promptText: String) {
+        let scriptPath = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.claude/monitor/summarize.sh"
+        let sessionFilePath = "\(sessionsDir)/\(sessionId).json"
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/bash")
+            task.arguments = [scriptPath]
+
+            let inputPipe = Pipe()
+            let outputPipe = Pipe()
+            task.standardInput = inputPipe
+            task.standardOutput = outputPipe
+            task.standardError = FileHandle.nullDevice
+
+            do {
+                try task.run()
+                inputPipe.fileHandleForWriting.write(promptText.data(using: .utf8) ?? Data())
+                inputPipe.fileHandleForWriting.closeFile()
+                task.waitUntilExit()
+
+                let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let title = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                if !title.isEmpty && task.terminationStatus == 0 {
+                    self.writeTitleToSession(sessionId: sessionId, title: title, filePath: sessionFilePath)
+                    DispatchQueue.main.async {
+                        self.titleGenerated.insert(sessionId)
+                        self.summarizeInFlight.remove(sessionId)
+                    }
+                    NSLog("[ClaudeMonitor] Generated title for %@: %@", sessionId, title)
+                } else {
+                    DispatchQueue.main.async {
+                        self.summarizeInFlight.remove(sessionId)
+                    }
+                    NSLog("[ClaudeMonitor] Summarize returned empty for %@", sessionId)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.summarizeInFlight.remove(sessionId)
+                }
+                NSLog("[ClaudeMonitor] Summarize failed for %@: %@", sessionId, error.localizedDescription)
+            }
+        }
+    }
+
+    private func writeTitleToSession(sessionId: String, title: String, filePath: String) {
+        let fm = FileManager.default
+        guard let data = fm.contents(atPath: filePath) else { return }
+        do {
+            var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            json["title"] = title
+            let updated = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted])
+            let tmpPath = filePath + ".tmp"
+            try updated.write(to: URL(fileURLWithPath: tmpPath))
+            try fm.moveItem(atPath: tmpPath, toPath: filePath)
+        } catch {
+            NSLog("[ClaudeMonitor] Failed to write title for %@: %@", sessionId, error.localizedDescription)
         }
     }
 
@@ -1183,6 +1292,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        reader.setConfigManager(configManager)
 
         panel = FloatingPanel()
 
