@@ -109,7 +109,7 @@ print(json.dumps({
 " "$msg" "$model" "$stability" "$similarity")
 
             local http_code
-            http_code=$(curl -s -w '%{http_code}' -X POST \
+            http_code=$(curl -s --connect-timeout 3 --max-time 10 -w '%{http_code}' -X POST \
                 "https://api.elevenlabs.io/v1/text-to-speech/$ELEVENLABS_VOICE_ID" \
                 -H "xi-api-key: $ELEVENLABS_API_KEY" \
                 -H "Content-Type: application/json" \
@@ -243,7 +243,7 @@ case "$EVENT" in
         fi
         create_session "starting"
         if should_announce start; then
-            announce "$PROJECT_NAME starting" &
+            announce "$PROJECT_NAME starting" </dev/null >/dev/null 2>&1 &
         fi
         ;;
 
@@ -287,7 +287,7 @@ case "$EVENT" in
             fi
         fi
         if should_announce done; then
-            announce "$PROJECT_NAME done" &
+            announce "$PROJECT_NAME done" </dev/null >/dev/null 2>&1 &
         fi
         ;;
 
@@ -305,7 +305,7 @@ case "$EVENT" in
             fi
         fi
         if should_announce attention; then
-            announce "$PROJECT_NAME needs attention" &
+            announce "$PROJECT_NAME needs attention" </dev/null >/dev/null 2>&1 &
         fi
         ;;
 
