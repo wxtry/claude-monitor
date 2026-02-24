@@ -709,6 +709,72 @@ func switchByTerminalCwd(cwd: String) {
     }
 }
 
+// MARK: - Terminal Window Frame
+
+func getTerminalWindowFrame(session: SessionInfo) -> NSRect? {
+    guard !session.terminal.isEmpty, !session.terminal_session_id.isEmpty else { return nil }
+
+    let script: String
+
+    if session.terminal == "iterm2" {
+        let parts = session.terminal_session_id.split(separator: ":")
+        guard parts.count >= 2 else { return nil }
+        let uniqueId = String(parts[1])
+
+        script = """
+        tell application "iTerm2"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if unique id of s is "\(uniqueId)" then
+                            return bounds of w
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        """
+    } else if session.terminal == "terminal" {
+        let ttyPath = session.terminal_session_id
+
+        script = """
+        tell application "Terminal"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(ttyPath)" then
+                        return bounds of w
+                    end if
+                end repeat
+            end repeat
+        end tell
+        """
+    } else {
+        return nil
+    }
+
+    guard let appleScript = NSAppleScript(source: script) else { return nil }
+
+    var error: NSDictionary?
+    let result = appleScript.executeAndReturnError(&error)
+
+    guard error == nil else { return nil }
+    guard result.numberOfItems == 4 else { return nil }
+
+    let left = result.atIndex(1)?.doubleValue ?? 0
+    let top = result.atIndex(2)?.doubleValue ?? 0
+    let right = result.atIndex(3)?.doubleValue ?? 0
+    let bottom = result.atIndex(4)?.doubleValue ?? 0
+
+    // AppleScript bounds use top-left origin relative to primary screen; AppKit uses bottom-left of primary
+    let screenHeight = NSScreen.screens.first?.frame.height ?? 0
+    let x = left
+    let y = screenHeight - bottom
+    let width = right - left
+    let height = bottom - top
+
+    return NSRect(x: x, y: y, width: width, height: height)
+}
+
 // MARK: - Session Killer
 
 func killSession(_ session: SessionInfo) {
