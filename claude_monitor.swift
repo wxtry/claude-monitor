@@ -571,11 +571,15 @@ class SessionReader: ObservableObject {
             var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
             json["title"] = title
             let updated = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted])
-            let tmpPath = filePath + ".tmp"
-            try updated.write(to: URL(fileURLWithPath: tmpPath))
-            try fm.moveItem(atPath: tmpPath, toPath: filePath)
+            let tmpPath = filePath + ".title.tmp"
+            let tmpURL = URL(fileURLWithPath: tmpPath)
+            let fileURL = URL(fileURLWithPath: filePath)
+            try updated.write(to: tmpURL)
+            _ = try fm.replaceItemAt(fileURL, withItemAt: tmpURL)
         } catch {
             NSLog("[ClaudeMonitor] Failed to write title for %@: %@", sessionId, error.localizedDescription)
+            // Clean up tmp file on failure
+            try? fm.removeItem(atPath: filePath + ".title.tmp")
         }
     }
 
