@@ -19,5 +19,11 @@
     "on_start": false,
     "volume": 0.5
   },
-  "voices": []
+  "voices": [],
+  "summary": {
+    "enabled": true,
+    "env_file": "~/.env",
+    "model": "gemini-2.0-flash",
+    "threshold_chars": 4000
+  }
 }

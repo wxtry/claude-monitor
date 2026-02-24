@@ -35,6 +35,13 @@ struct MonitorConfig: Codable {
         var name: String
     }
     var voices: [SavedVoice]?
+    struct SummaryConfig: Codable {
+        var enabled: Bool
+        var env_file: String
+        var model: String
+        var threshold_chars: Int
+    }
+    var summary: SummaryConfig?
 }
 
 // MARK: - ElevenLabs Voice Info
