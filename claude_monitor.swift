@@ -551,6 +551,19 @@ class SessionReader: ObservableObject {
         }
     }
 
+    func regenerateTitles() {
+        guard let config = configManager?.config?.summary, config.enabled else { return }
+
+        for session in sessions {
+            let accumulated = promptAccumulator[session.session_id] ?? ""
+            guard !accumulated.isEmpty else { continue }
+            guard !summarizeInFlight.contains(session.session_id) else { continue }
+            summarizeInFlight.insert(session.session_id)
+            titleGenerated.remove(session.session_id)
+            runSummarize(sessionId: session.session_id, promptText: accumulated)
+        }
+    }
+
     private func writeTitleToSession(sessionId: String, title: String, filePath: String) {
         let fm = FileManager.default
         guard let data = fm.contents(atPath: filePath) else { return }
@@ -844,6 +857,7 @@ struct SettingsPopover: View {
             // Refresh sessions
             Button {
                 sessionReader?.discoverSessions()
+                sessionReader?.regenerateTitles()
                 refreshed = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { refreshed = false }
             } label: {
