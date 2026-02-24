@@ -868,9 +868,14 @@ func moveTerminalWindow(session: SessionInfo, to rect: NSRect) {
 
 /// Stacks all session terminal windows in cascade, right-top aligned to the panel.
 /// `sessions` should be in display order (same as list). `panelFrame` is the Monitor panel's frame in AppKit coords.
-func stackWindows(sessions: [SessionInfo], panelFrame: NSRect) {
+/// If `uniformSize` is provided, all windows are resized to that size before stacking.
+func stackWindows(sessions: [SessionInfo], panelFrame: NSRect, uniformSize: NSSize? = nil) {
     let cascadeOffset: CGFloat = 30
-    let screenFrame = NSScreen.main?.visibleFrame ?? .zero
+
+    // Find the screen containing the panel (not NSScreen.main which is the key-window screen)
+    let panelCenter = NSPoint(x: panelFrame.midX, y: panelFrame.midY)
+    let screenFrame = NSScreen.screens.first(where: { $0.frame.contains(panelCenter) })?.visibleFrame
+        ?? NSScreen.main?.visibleFrame ?? .zero
 
     // Anchor point: panel's bottom-right corner in AppKit coords.
     // Windows cascade downward from here (panel bottom = window top boundary).
@@ -881,15 +886,21 @@ func stackWindows(sessions: [SessionInfo], panelFrame: NSRect) {
         // Skip sessions without terminal info (avoids unnecessary AppleScript call)
         guard !session.terminal.isEmpty, !session.terminal_session_id.isEmpty else { continue }
 
-        // Get current window size (keep original size)
-        guard let currentFrame = getTerminalWindowFrame(session: session) else { continue }
+        // Get current window size; if uniformSize specified, use that instead
+        let winSize: NSSize
+        if let uniform = uniformSize {
+            winSize = uniform
+        } else {
+            guard let currentFrame = getTerminalWindowFrame(session: session) else { continue }
+            winSize = currentFrame.size
+        }
 
         let offset = CGFloat(index) * cascadeOffset
         // Right edge aligned to anchor, each window shifts left and down
-        let newX = max(screenFrame.minX, anchorRight - currentFrame.width - offset)
-        let newY = max(screenFrame.minY, anchorY - currentFrame.height - offset)
+        let newX = max(screenFrame.minX, anchorRight - winSize.width - offset)
+        let newY = max(screenFrame.minY, anchorY - winSize.height - offset)
 
-        let newRect = NSRect(x: newX, y: newY, width: currentFrame.width, height: currentFrame.height)
+        let newRect = NSRect(x: newX, y: newY, width: winSize.width, height: winSize.height)
         moveTerminalWindow(session: session, to: newRect)
     }
 }
@@ -1280,6 +1291,7 @@ struct HeaderBar: View {
     @ObservedObject var configManager: ConfigManager
     var sessionReader: SessionReader?
     @State private var showSettings = false
+    @State private var lastStackClickTime: Date = .distantPast
 
     var attentionCount: Int { sessions.filter { $0.status == "attention" }.count }
     var workingCount: Int { sessions.filter { $0.status == "working" }.count }
@@ -1330,9 +1342,22 @@ struct HeaderBar: View {
 
                 Button {
                     guard let panelFrame = NSApp.windows.first(where: { $0 is FloatingPanel })?.frame else { return }
+                    let now = Date()
+                    let isDoubleClick = now.timeIntervalSince(lastStackClickTime) < 2.0
+                    lastStackClickTime = now
                     let orderedSessions = sessions
                     DispatchQueue.global(qos: .userInitiated).async {
-                        stackWindows(sessions: orderedSessions, panelFrame: panelFrame)
+                        if isDoubleClick {
+                            // Uniform size: 50% of the panel's screen, capped at 1200x800
+                            let panelCenter = NSPoint(x: panelFrame.midX, y: panelFrame.midY)
+                            let screen = NSScreen.screens.first(where: { $0.frame.contains(panelCenter) }) ?? NSScreen.main
+                            let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+                            let w = min(1200, visibleFrame.width * 0.5)
+                            let h = min(800, visibleFrame.height * 0.6)
+                            stackWindows(sessions: orderedSessions, panelFrame: panelFrame, uniformSize: NSSize(width: w, height: h))
+                        } else {
+                            stackWindows(sessions: orderedSessions, panelFrame: panelFrame)
+                        }
                     }
                 } label: {
                     Image(systemName: "rectangle.stack")
@@ -1340,7 +1365,7 @@ struct HeaderBar: View {
                         .foregroundColor(.white.opacity(0.2))
                 }
                 .buttonStyle(.plain)
-                .help("Stack windows")
+                .help("Stack windows (click twice to resize)")
 
                 Button {
                     showSettings.toggle()
