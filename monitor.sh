@@ -241,9 +241,15 @@ case "$EVENT" in
         if [ -n "$EXISTING" ] && [ "$EXISTING" != "$SESSION_FILE" ]; then
             exit 0
         fi
-        create_session "starting"
-        if should_announce start; then
-            announce "$PROJECT_NAME starting" </dev/null >/dev/null 2>&1 &
+        # If session file already exists (e.g. compact restart), preserve it — just update timestamp
+        if [ -f "$SESSION_FILE" ]; then
+            jq --arg updated "$NOW" '.updated_at = $updated' \
+                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+        else
+            create_session "starting"
+            if should_announce start; then
+                announce "$PROJECT_NAME starting" </dev/null >/dev/null 2>&1 &
+            fi
         fi
         ;;
 
@@ -310,14 +316,15 @@ case "$EVENT" in
         ;;
 
     PostToolUse)
-        # After tool execution, if status was "attention" (permission just granted), set back to "working"
+        # After tool execution: restore "attention" → "working" (permission granted),
+        # or "starting" → "working" (compact restart, tool use implies active work)
         TARGET="$SESSION_FILE"
         if [ ! -f "$TARGET" ]; then
             TARGET=$(find_existing_session)
         fi
         if [ -n "$TARGET" ] && [ -f "$TARGET" ]; then
             current_status=$(jq -r '.status' "$TARGET" 2>/dev/null)
-            if [ "$current_status" = "attention" ]; then
+            if [ "$current_status" = "attention" ] || [ "$current_status" = "starting" ]; then
                 jq --arg status "working" --arg updated "$NOW" \
                     '.status = $status | .updated_at = $updated' \
                     "$TARGET" > "${TARGET}.tmp" && mv "${TARGET}.tmp" "$TARGET"

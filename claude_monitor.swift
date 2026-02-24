@@ -1578,175 +1578,298 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Click Guide Animator
 
 class ClickGuideAnimator {
-    var overlayWindow: NSWindow?
-    var eventMonitor: Any?
-    var cleanupWorkItem: DispatchWorkItem?
+    private var overlayWindows: [NSWindow] = []
+    private var eventMonitor: Any?
+    private var cleanupWorkItem: DispatchWorkItem?
+
+    /// Create a per-screen transparent overlay window
+    private func makeOverlay(for screen: NSScreen) -> NSWindow {
+        let w = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        w.level = .screenSaver
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.ignoresMouseEvents = true
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let v = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        v.wantsLayer = true
+        w.contentView = v
+        return w
+    }
+
+    /// Find which screen contains a point
+    private func screen(containing point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+    }
+
+    /// Convert screen-space point to local window/view coords for a given screen
+    private func localPoint(_ point: NSPoint, in screen: NSScreen) -> NSPoint {
+        NSPoint(x: point.x - screen.frame.origin.x, y: point.y - screen.frame.origin.y)
+    }
+
+    /// Convert screen-space rect to local coords for a given screen
+    private func localRect(_ rect: NSRect, in screen: NSScreen) -> NSRect {
+        NSRect(x: rect.origin.x - screen.frame.origin.x, y: rect.origin.y - screen.frame.origin.y,
+               width: rect.width, height: rect.height)
+    }
 
     func animate(from fromPoint: NSPoint, to targetFrame: NSRect, color: NSColor) {
         cleanup()
 
-        // Create overlay covering all screens
-        let unionFrame = NSScreen.screens.reduce(NSRect.zero) { $0.union($1.frame) }
-        let window = NSWindow(
-            contentRect: unionFrame,
-            styleMask: .borderless,
-            backing: .buffered,
-            defer: false
-        )
-        window.level = .screenSaver
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.ignoresMouseEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let targetMid = NSPoint(x: targetFrame.midX, y: targetFrame.midY)
+        let sourceScreen = screen(containing: fromPoint)
+        let targetScreen = screen(containing: targetMid)
+        let sameScreen = (sourceScreen == targetScreen)
 
-        let contentView = NSView(frame: NSRect(origin: .zero, size: unionFrame.size))
-        contentView.wantsLayer = true
-        window.contentView = contentView
-        self.overlayWindow = window
+        // --- Distance-based flight duration (fix #1) ---
+        let dx = targetMid.x - fromPoint.x
+        let dy = targetMid.y - fromPoint.y
+        let distance = sqrt(dx * dx + dy * dy)
+        let flightDuration = max(0.3, min(0.8, distance / 1500.0))
 
-        // Convert coordinates to local overlay space
-        let localFrom = NSPoint(
-            x: fromPoint.x - unionFrame.origin.x,
-            y: fromPoint.y - unionFrame.origin.y
-        )
-        let localTarget = NSRect(
-            x: targetFrame.origin.x - unionFrame.origin.x,
-            y: targetFrame.origin.y - unionFrame.origin.y,
-            width: targetFrame.width,
-            height: targetFrame.height
-        )
-        let targetCenter = NSPoint(
-            x: localTarget.midX,
-            y: localTarget.midY
-        )
+        // --- Source screen: orb ---
+        if let src = sourceScreen {
+            let srcWindow = makeOverlay(for: src)
+            let srcLayer = srcWindow.contentView!.layer!
+            let lFrom = localPoint(fromPoint, in: src)
 
-        // Create orb layer (radial gradient)
-        let orbSize: CGFloat = 50
-        let orbLayer = CAGradientLayer()
-        orbLayer.type = .radial
-        orbLayer.colors = [
-            color.withAlphaComponent(0.8).cgColor,
-            color.withAlphaComponent(0.0).cgColor
-        ]
-        orbLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
-        orbLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-        orbLayer.bounds = CGRect(x: 0, y: 0, width: orbSize, height: orbSize)
-        orbLayer.cornerRadius = orbSize / 2
-        orbLayer.position = localFrom
-        contentView.layer?.addSublayer(orbLayer)
+            // Orb destination: target center if same screen, otherwise fly toward screen edge
+            let orbDest: NSPoint
+            if sameScreen {
+                orbDest = localPoint(targetMid, in: src)
+            } else {
+                // Fly toward the edge of this screen in the direction of target
+                let lTarget = localPoint(targetMid, in: src)
+                let screenW = src.frame.width
+                let screenH = src.frame.height
+                // Find parameter t where the line exits the screen bounds
+                var tMin: CGFloat = 1.0
+                let odx = lTarget.x - lFrom.x
+                let ody = lTarget.y - lFrom.y
+                if odx != 0 {
+                    let tRight = (screenW - lFrom.x) / odx
+                    let tLeft = -lFrom.x / odx
+                    if tRight > 0 { tMin = min(tMin, tRight) }
+                    if tLeft > 0 { tMin = min(tMin, tLeft) }
+                }
+                if ody != 0 {
+                    let tTop = (screenH - lFrom.y) / ody
+                    let tBottom = -lFrom.y / ody
+                    if tTop > 0 { tMin = min(tMin, tTop) }
+                    if tBottom > 0 { tMin = min(tMin, tBottom) }
+                }
+                orbDest = NSPoint(x: lFrom.x + odx * tMin * 0.95, y: lFrom.y + ody * tMin * 0.95)
+            }
 
-        // Create border layer (hidden initially)
+            // Orb layer
+            let orbSize: CGFloat = 50
+            let orbLayer = CAGradientLayer()
+            orbLayer.type = .radial
+            orbLayer.colors = [color.withAlphaComponent(0.8).cgColor, color.withAlphaComponent(0.0).cgColor]
+            orbLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+            orbLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
+            orbLayer.bounds = CGRect(x: 0, y: 0, width: orbSize, height: orbSize)
+            orbLayer.cornerRadius = orbSize / 2
+            orbLayer.position = lFrom
+            srcLayer.addSublayer(orbLayer)
+
+            // If same screen, also add border here
+            if sameScreen {
+                addBorderLayer(to: srcLayer, frame: localRect(targetFrame, in: src), color: color, delay: flightDuration)
+            }
+
+            srcWindow.orderFrontRegardless()
+            overlayWindows.append(srcWindow)
+
+            // Flight animation
+            let midPt = NSPoint(x: (lFrom.x + orbDest.x) / 2, y: (lFrom.y + orbDest.y) / 2)
+            let fdx = orbDest.x - lFrom.x
+            let fdy = orbDest.y - lFrom.y
+            let fDist = sqrt(fdx * fdx + fdy * fdy)
+            let perpOff = fDist * 0.15
+            let pX = -(fdy) / max(fDist, 1)
+            let pY = fdx / max(fDist, 1)
+            let ctrl = CGPoint(x: midPt.x + pX * perpOff, y: midPt.y + pY * perpOff)
+
+            let path = CGMutablePath()
+            path.move(to: lFrom)
+            path.addQuadCurve(to: orbDest, control: ctrl)
+
+            let flightAnim = CAKeyframeAnimation(keyPath: "position")
+            flightAnim.path = path
+            flightAnim.duration = flightDuration
+            flightAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            flightAnim.fillMode = .forwards
+            flightAnim.isRemovedOnCompletion = false
+            orbLayer.add(flightAnim, forKey: "flight")
+
+            // Dissolve orb after flight
+            DispatchQueue.main.asyncAfter(deadline: .now() + flightDuration) { [weak self] in
+                guard !(self?.overlayWindows.isEmpty ?? true) else { return }
+                let scaleAnim = CABasicAnimation(keyPath: "transform.scale")
+                scaleAnim.fromValue = 1.0; scaleAnim.toValue = 3.0
+                let fadeAnim = CABasicAnimation(keyPath: "opacity")
+                fadeAnim.fromValue = 1.0; fadeAnim.toValue = 0.0
+                let group = CAAnimationGroup()
+                group.animations = [scaleAnim, fadeAnim]
+                group.duration = 0.4
+                group.fillMode = .forwards; group.isRemovedOnCompletion = false
+                orbLayer.add(group, forKey: "dissolve")
+            }
+        }
+
+        // --- Target screen (different from source): orb enters from edge + border ---
+        if !sameScreen, let tgt = targetScreen {
+            let tgtWindow = makeOverlay(for: tgt)
+            let tgtLayer = tgtWindow.contentView!.layer!
+            let lTarget = localPoint(targetMid, in: tgt)
+
+            // Calculate entry point: where the line from source enters this screen
+            let lSource = localPoint(fromPoint, in: tgt)
+            let screenW = tgt.frame.width
+            let screenH = tgt.frame.height
+            var tMax: CGFloat = 0.0
+            let edx = lTarget.x - lSource.x
+            let edy = lTarget.y - lSource.y
+            // Find the largest t < 1 where the line crosses a screen edge (entry point)
+            if edx != 0 {
+                let tLeft = -lSource.x / edx
+                let tRight = (screenW - lSource.x) / edx
+                if tLeft > 0 && tLeft < 1 { tMax = max(tMax, tLeft) }
+                if tRight > 0 && tRight < 1 { tMax = max(tMax, tRight) }
+            }
+            if edy != 0 {
+                let tBottom = -lSource.y / edy
+                let tTop = (screenH - lSource.y) / edy
+                if tBottom > 0 && tBottom < 1 { tMax = max(tMax, tBottom) }
+                if tTop > 0 && tTop < 1 { tMax = max(tMax, tTop) }
+            }
+            let entryPoint = NSPoint(
+                x: lSource.x + edx * max(tMax, 0.01),
+                y: lSource.y + edy * max(tMax, 0.01)
+            )
+
+            // Second orb: enters from screen edge, flies to target center
+            let orbSize: CGFloat = 50
+            let orb2 = CAGradientLayer()
+            orb2.type = .radial
+            orb2.colors = [color.withAlphaComponent(0.8).cgColor, color.withAlphaComponent(0.0).cgColor]
+            orb2.startPoint = CGPoint(x: 0.5, y: 0.5)
+            orb2.endPoint = CGPoint(x: 1.0, y: 1.0)
+            orb2.bounds = CGRect(x: 0, y: 0, width: orbSize, height: orbSize)
+            orb2.cornerRadius = orbSize / 2
+            orb2.position = entryPoint
+            tgtLayer.addSublayer(orb2)
+
+            // Border glow at target
+            let secondFlightDuration = max(0.2, min(0.5, flightDuration * 0.6))
+            addBorderLayer(to: tgtLayer, frame: localRect(targetFrame, in: tgt), color: color, delay: secondFlightDuration)
+
+            tgtWindow.orderFrontRegardless()
+            overlayWindows.append(tgtWindow)
+
+            // Animate second orb after source orb reaches edge
+            DispatchQueue.main.asyncAfter(deadline: .now() + flightDuration * 0.8) { [weak self] in
+                guard !(self?.overlayWindows.isEmpty ?? true) else { return }
+
+                // Flight from edge to target center
+                let path2 = CGMutablePath()
+                path2.move(to: entryPoint)
+                path2.addLine(to: lTarget)
+                let flight2 = CAKeyframeAnimation(keyPath: "position")
+                flight2.path = path2
+                flight2.duration = secondFlightDuration
+                flight2.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                flight2.fillMode = .forwards
+                flight2.isRemovedOnCompletion = false
+                orb2.add(flight2, forKey: "flight")
+
+                // Dissolve after arrival
+                DispatchQueue.main.asyncAfter(deadline: .now() + secondFlightDuration) { [weak self] in
+                    guard !(self?.overlayWindows.isEmpty ?? true) else { return }
+                    let scaleAnim = CABasicAnimation(keyPath: "transform.scale")
+                    scaleAnim.fromValue = 1.0; scaleAnim.toValue = 3.0
+                    let fadeAnim = CABasicAnimation(keyPath: "opacity")
+                    fadeAnim.fromValue = 1.0; fadeAnim.toValue = 0.0
+                    let group = CAAnimationGroup()
+                    group.animations = [scaleAnim, fadeAnim]
+                    group.duration = 0.4
+                    group.fillMode = .forwards; group.isRemovedOnCompletion = false
+                    orb2.add(group, forKey: "dissolve")
+                }
+            }
+        }
+
+        // Event monitor — cancel on any interaction
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] _ in
+            self?.cancelWithFade()
+        }
+
+        // Auto-cleanup (allow extra time for cross-screen second orb)
+        let totalDuration = sameScreen ? flightDuration + 1.0 : flightDuration + 2.0
+        let workItem = DispatchWorkItem { [weak self] in self?.cleanup() }
+        cleanupWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + totalDuration, execute: workItem)
+    }
+
+    /// Add a glowing border layer to the given parent layer (fix #3)
+    private func addBorderLayer(to parent: CALayer, frame: NSRect, color: NSColor, delay: Double) {
+        // Glow layer (larger, blurred shadow behind border)
+        let glowInset: CGFloat = -8
+        let glowRect = frame.insetBy(dx: glowInset, dy: glowInset)
+        let glowLayer = CAShapeLayer()
+        let glowPath = NSBezierPath(roundedRect: glowRect, xRadius: 14, yRadius: 14)
+        glowLayer.path = glowPath.cgPath
+        glowLayer.strokeColor = color.withAlphaComponent(0.6).cgColor
+        glowLayer.lineWidth = 6
+        glowLayer.fillColor = nil
+        glowLayer.shadowColor = color.cgColor
+        glowLayer.shadowRadius = 20
+        glowLayer.shadowOpacity = 0.8
+        glowLayer.shadowOffset = .zero
+        glowLayer.opacity = 0
+        parent.addSublayer(glowLayer)
+
+        // Crisp border layer on top
         let borderLayer = CAShapeLayer()
-        let borderPath = NSBezierPath(
-            roundedRect: localTarget,
-            xRadius: 10,
-            yRadius: 10
-        )
+        let borderPath = NSBezierPath(roundedRect: frame, xRadius: 10, yRadius: 10)
         borderLayer.path = borderPath.cgPath
-        borderLayer.strokeColor = color.withAlphaComponent(0.8).cgColor
+        borderLayer.strokeColor = color.withAlphaComponent(0.9).cgColor
         borderLayer.lineWidth = 3
         borderLayer.fillColor = nil
         borderLayer.opacity = 0
-        contentView.layer?.addSublayer(borderLayer)
+        parent.addSublayer(borderLayer)
 
-        // Show overlay
-        window.orderFrontRegardless()
-
-        // Build flight path with slight arc
-        let dx = targetCenter.x - localFrom.x
-        let dy = targetCenter.y - localFrom.y
-        let midX = (localFrom.x + targetCenter.x) / 2
-        let midY = (localFrom.y + targetCenter.y) / 2
-        let distance = sqrt(dx * dx + dy * dy)
-        let offset = distance * 0.15
-        // Perpendicular direction
-        let perpX = -dy / (distance == 0 ? 1 : distance)
-        let perpY = dx / (distance == 0 ? 1 : distance)
-        let controlPoint = CGPoint(
-            x: midX + perpX * offset,
-            y: midY + perpY * offset
-        )
-
-        let flightPath = CGMutablePath()
-        flightPath.move(to: localFrom)
-        flightPath.addQuadCurve(to: targetCenter, control: controlPoint)
-
-        // Animate orb flight (~300ms)
-        let flightAnim = CAKeyframeAnimation(keyPath: "position")
-        flightAnim.path = flightPath
-        flightAnim.duration = 0.3
-        flightAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        flightAnim.fillMode = .forwards
-        flightAnim.isRemovedOnCompletion = false
-        orbLayer.add(flightAnim, forKey: "flight")
-
-        // After flight completes, dissolve orb and pulse border
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard self?.overlayWindow != nil else { return }
-
-            // Orb dissolve: scale 1→3 and opacity 1→0
-            let scaleAnim = CABasicAnimation(keyPath: "transform.scale")
-            scaleAnim.fromValue = 1.0
-            scaleAnim.toValue = 3.0
-
-            let fadeAnim = CABasicAnimation(keyPath: "opacity")
-            fadeAnim.fromValue = 1.0
-            fadeAnim.toValue = 0.0
-
-            let dissolveGroup = CAAnimationGroup()
-            dissolveGroup.animations = [scaleAnim, fadeAnim]
-            dissolveGroup.duration = 0.4
-            dissolveGroup.fillMode = .forwards
-            dissolveGroup.isRemovedOnCompletion = false
-            orbLayer.add(dissolveGroup, forKey: "dissolve")
-
-            // Border pulse: fade in then pulse then fade out
+        // Pulse animation for both layers
+        let startTime = CACurrentMediaTime() + delay
+        for layer in [glowLayer, borderLayer] {
             let fadeIn = CABasicAnimation(keyPath: "opacity")
-            fadeIn.fromValue = 0.0
-            fadeIn.toValue = 1.0
-            fadeIn.duration = 0.15
-            fadeIn.beginTime = 0
+            fadeIn.fromValue = 0.0; fadeIn.toValue = 1.0
+            fadeIn.duration = 0.15; fadeIn.beginTime = 0
             fadeIn.fillMode = .forwards
 
             let pulse = CAKeyframeAnimation(keyPath: "opacity")
             pulse.values = [1.0, 0.3, 1.0, 0.0]
-            pulse.duration = 0.8
-            pulse.beginTime = 0.15
+            pulse.duration = 0.8; pulse.beginTime = 0.15
             pulse.fillMode = .forwards
 
-            let borderGroup = CAAnimationGroup()
-            borderGroup.animations = [fadeIn, pulse]
-            borderGroup.duration = 0.95
-            borderGroup.fillMode = .forwards
-            borderGroup.isRemovedOnCompletion = false
-            borderLayer.add(borderGroup, forKey: "pulse")
+            let group = CAAnimationGroup()
+            group.animations = [fadeIn, pulse]
+            group.duration = 0.95
+            group.fillMode = .forwards; group.isRemovedOnCompletion = false
+            group.beginTime = startTime
+            layer.add(group, forKey: "pulse")
         }
-
-        // Register global event monitor for early cancellation
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .keyDown]
-        ) { [weak self] _ in
-            self?.cancelWithFade()
-        }
-
-        // Auto-cleanup after 1.3s
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.cleanup()
-        }
-        self.cleanupWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: workItem)
     }
 
     private func cancelWithFade() {
         cleanupWorkItem?.cancel()
-        if let window = overlayWindow {
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.1
-                window.animator().alphaValue = 0
-            }, completionHandler: { [weak self] in
-                self?.cleanup()
-            })
-        }
+        guard !overlayWindows.isEmpty else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.1
+            for w in overlayWindows { w.animator().alphaValue = 0 }
+        }, completionHandler: { [weak self] in
+            self?.cleanup()
+        })
     }
 
     func cleanup() {
@@ -1754,8 +1877,8 @@ class ClickGuideAnimator {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
         }
-        overlayWindow?.orderOut(nil)
-        overlayWindow = nil
+        for w in overlayWindows { w.orderOut(nil) }
+        overlayWindows.removeAll()
         cleanupWorkItem?.cancel()
         cleanupWorkItem = nil
     }
