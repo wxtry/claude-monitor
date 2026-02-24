@@ -11,6 +11,11 @@ set -euo pipefail
 EVENT="${1:-unknown}"
 INPUT=$(cat)
 
+# Debug: log raw hook input
+echo "$(date -u +%H:%M:%S) event=$EVENT" >> /tmp/hook_debug.log
+echo "$INPUT" | jq '.' >> /tmp/hook_debug.log 2>/dev/null
+echo "---" >> /tmp/hook_debug.log
+
 # --- Paths ---
 MONITOR_DIR="$HOME/.claude/monitor"
 SESSIONS_DIR="$MONITOR_DIR/sessions"
@@ -187,9 +192,55 @@ create_session() {
         > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
+# --- Deduplicate by TTY or CWD ---
+# Find existing session file for the same TTY (to handle subagents)
+find_session_by_tty() {
+    local tty="$1"
+    [ -z "$tty" ] && return
+    for f in "$SESSIONS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        local f_tty
+        f_tty=$(jq -r '.terminal_session_id // empty' "$f" 2>/dev/null)
+        if [ "$f_tty" = "$tty" ]; then
+            echo "$f"
+            return
+        fi
+    done
+}
+
+# Find existing active session by CWD (matches exact, parent, or child paths)
+find_session_by_cwd() {
+    local target_cwd="$1"
+    [ -z "$target_cwd" ] && return
+    for f in "$SESSIONS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        local f_cwd f_status
+        f_cwd=$(jq -r '.cwd // empty' "$f" 2>/dev/null)
+        f_status=$(jq -r '.status // empty' "$f" 2>/dev/null)
+        [ "$f_status" = "done" ] && continue
+        # Match if either is a prefix of the other (parent/child relationship)
+        case "$target_cwd" in "$f_cwd"*) echo "$f"; return ;; esac
+        case "$f_cwd" in "$target_cwd"*) echo "$f"; return ;; esac
+    done
+}
+
+# Find existing session: prefer TTY match, fallback to CWD match
+find_existing_session() {
+    if [ -n "$TERM_SID" ]; then
+        find_session_by_tty "$TERM_SID"
+    else
+        find_session_by_cwd "${CWD:-}"
+    fi
+}
+
 # --- Handle events ---
 case "$EVENT" in
     SessionStart)
+        # Skip if same TTY (or same CWD when TTY unknown) already has an active session
+        EXISTING=$(find_existing_session)
+        if [ -n "$EXISTING" ] && [ "$EXISTING" != "$SESSION_FILE" ]; then
+            exit 0
+        fi
         create_session "starting"
         if should_announce start; then
             announce "$PROJECT_NAME starting" &
@@ -199,7 +250,6 @@ case "$EVENT" in
     UserPromptSubmit)
         PROMPT_TEXT=$(echo "$INPUT" | jq -r '.prompt // empty' | head -c 200)
         if [ -f "$SESSION_FILE" ]; then
-            # Single atomic write: status + prompt + terminal backfill
             jq \
                 --arg status "working" \
                 --arg updated "$NOW" \
@@ -209,7 +259,17 @@ case "$EVENT" in
                 '.status = $status | .updated_at = $updated | .last_prompt = $prompt | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
                 "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         else
-            create_session "working" "$PROMPT_TEXT"
+            EXISTING=$(find_existing_session)
+            if [ -n "$EXISTING" ]; then
+                jq \
+                    --arg status "working" \
+                    --arg updated "$NOW" \
+                    --arg prompt "$PROMPT_TEXT" \
+                    '.status = $status | .updated_at = $updated | .last_prompt = $prompt' \
+                    "$EXISTING" > "${EXISTING}.tmp" && mv "${EXISTING}.tmp" "$EXISTING"
+            else
+                create_session "working" "$PROMPT_TEXT"
+            fi
         fi
         ;;
 
@@ -217,7 +277,14 @@ case "$EVENT" in
         if [ -f "$SESSION_FILE" ]; then
             update_session "done"
         else
-            create_session "done"
+            EXISTING=$(find_existing_session)
+            if [ -n "$EXISTING" ]; then
+                jq --arg status "done" --arg updated "$NOW" \
+                    '.status = $status | .updated_at = $updated' \
+                    "$EXISTING" > "${EXISTING}.tmp" && mv "${EXISTING}.tmp" "$EXISTING"
+            else
+                create_session "done"
+            fi
         fi
         if should_announce done; then
             announce "$PROJECT_NAME done" &
@@ -228,7 +295,14 @@ case "$EVENT" in
         if [ -f "$SESSION_FILE" ]; then
             update_session "attention"
         else
-            create_session "attention"
+            EXISTING=$(find_existing_session)
+            if [ -n "$EXISTING" ]; then
+                jq --arg status "attention" --arg updated "$NOW" \
+                    '.status = $status | .updated_at = $updated' \
+                    "$EXISTING" > "${EXISTING}.tmp" && mv "${EXISTING}.tmp" "$EXISTING"
+            else
+                create_session "attention"
+            fi
         fi
         if should_announce attention; then
             announce "$PROJECT_NAME needs attention" &
@@ -236,9 +310,11 @@ case "$EVENT" in
         ;;
 
     SessionEnd)
-        # Remove session file after short delay so UI can show "done" briefly
-        (sleep 5 && rm -f "$SESSION_FILE") &
-        disown 2>/dev/null
+        if [ -f "$SESSION_FILE" ]; then
+            (sleep 5 && rm -f "$SESSION_FILE") &
+            disown 2>/dev/null
+        fi
+        # Don't clean up other TTY sessions here — subagent ends shouldn't kill parent
         ;;
 esac
 
