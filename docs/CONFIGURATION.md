@@ -33,6 +33,13 @@ All configuration lives in `~/.claude/monitor/config.json`. Changes are picked u
     "model": "gemini-2.0-flash",
     "threshold_chars": 4000,
     "proxy": ""
+  },
+  "notifications": {
+    "enabled": true,
+    "on_starting": false,
+    "on_working": true,
+    "on_done": true,
+    "on_attention": true
   }
 }
 ```
@@ -98,6 +105,22 @@ AI-generated session title configuration. Titles are generated via Gemini API wh
 Titles are generated once automatically when the threshold is reached. After that, click **Refresh sessions** in the settings popover to regenerate. If the API is unavailable, the project folder name is shown as fallback.
 
 The actual API call is handled by `~/.claude/monitor/summarize.sh` — a standalone script that reads config, calls Gemini, and outputs the title to stdout. Replace this script to use a different LLM provider.
+
+### `notifications`
+
+Controls macOS system notifications via Notification Center. Notifications are posted when a session transitions to a new status. Click a notification to switch to that session's terminal tab.
+
+Requires the app to run as a `.app` bundle (built with `bash ClaudeMonitorApp/build-app.sh`). When running as a bare binary, notification authorization will fail silently and this feature is disabled.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master toggle for system notifications. Also controllable from the settings popover |
+| `on_starting` | boolean | `false` | Notify when a new session starts |
+| `on_working` | boolean | `true` | Notify when a session begins working (prompt submitted) |
+| `on_done` | boolean | `true` | Notify when a session finishes |
+| `on_attention` | boolean | `true` | Notify when a session needs permission |
+
+Notifications are independent of voice announcements — both can fire for the same event, each controlled by its own config section (`notifications` vs `announce`).
 
 ### `voices`
 

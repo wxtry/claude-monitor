@@ -72,6 +72,13 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - Drag anywhere, resize from right edge, position persists across restarts
 - Thin custom scrollbar, minimal UI footprint
 
+**System notifications**
+- Native macOS Notification Center alerts for session state changes
+- Notifications for done, attention, working, and starting events — per-event toggles in `config.json`
+- Click a notification to switch directly to that terminal tab
+- Requires running as `.app` bundle — build with `bash ClaudeMonitorApp/build-app.sh`
+- Works alongside voice announcements (independent config)
+
 ## Install
 
 ### The easy way (recommended)
@@ -356,6 +363,13 @@ Full config reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
     "model": "gemini-2.0-flash",
     "threshold_chars": 4000,
     "proxy": ""
+  },
+  "notifications": {
+    "enabled": true,
+    "on_starting": false,
+    "on_working": true,
+    "on_done": true,
+    "on_attention": true
   }
 }
 ```
