@@ -1732,14 +1732,24 @@ struct WindowDragHandle: NSViewRepresentable {
 
 class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private var authorized = false
+    private var available = false
 
     override init() {
         super.init()
+        // UNUserNotificationCenter requires a valid bundle identifier (.app bundle).
+        // When running as a bare binary, Bundle.main.bundleIdentifier is nil and
+        // calling UNUserNotificationCenter.current() will crash.
+        guard Bundle.main.bundleIdentifier != nil else {
+            NSLog("[ClaudeMonitor] No bundle identifier — notifications disabled (run as .app bundle to enable)")
+            return
+        }
+        available = true
         UNUserNotificationCenter.current().delegate = self
         requestAuthorization()
     }
 
     private func requestAuthorization() {
+        guard available else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             DispatchQueue.main.async {
                 self.authorized = granted
@@ -1752,7 +1762,7 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func postStatusChange(session: SessionInfo, oldStatus: String, newStatus: String, config: MonitorConfig.NotificationConfig?) {
-        guard authorized else { return }
+        guard available, authorized else { return }
         guard let config = config, config.enabled else { return }
 
         switch newStatus {
