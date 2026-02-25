@@ -1,6 +1,7 @@
 import Cocoa
 import SwiftUI
 import Combine
+import UserNotifications
 
 // MARK: - NSBezierPath CGPath Extension
 
@@ -254,6 +255,20 @@ class ConfigManager: ObservableObject {
         config?.announce.enabled ?? true
     }
 
+    func toggleNotifications() {
+        if config?.notifications == nil {
+            config?.notifications = MonitorConfig.NotificationConfig(
+                enabled: true, on_starting: false, on_working: true, on_done: true, on_attention: true
+            )
+        }
+        config?.notifications?.enabled.toggle()
+        save()
+    }
+
+    var notificationsEnabled: Bool {
+        config?.notifications?.enabled ?? true
+    }
+
     func save() {
         guard let config = config else { return }
         let encoder = JSONEncoder()
@@ -415,9 +430,16 @@ class SessionReader: ObservableObject {
     private var titleGenerated: Set<String> = []
     @Published var summarizeInFlight: Set<String> = []
     private var configManager: ConfigManager?
+    private var lastKnownStatus: [String: String] = [:]
+    private var isFirstPoll = true
+    var notificationManager: NotificationManager?
 
     func setConfigManager(_ cm: ConfigManager) {
         self.configManager = cm
+    }
+
+    func setNotificationManager(_ nm: NotificationManager) {
+        self.notificationManager = nm
     }
 
     init() {
@@ -516,11 +538,42 @@ class SessionReader: ObservableObject {
             lastSeenPrompt.removeValue(forKey: key)
             titleGenerated.remove(key)
             summarizeInFlight.remove(key)
+            lastKnownStatus.removeValue(forKey: key)
         }
 
         // Sort: attention first, then working, then starting, then done
         let order: [String: Int] = ["attention": 0, "working": 1, "starting": 2, "done": 3]
         loaded.sort { (order[$0.status] ?? 9) < (order[$1.status] ?? 9) }
+
+        // Detect state transitions and fire notifications
+        if !isFirstPoll {
+            for session in loaded {
+                let oldStatus = lastKnownStatus[session.session_id]
+                if let old = oldStatus, old != session.status {
+                    notificationManager?.postStatusChange(
+                        session: session,
+                        oldStatus: old,
+                        newStatus: session.status,
+                        config: configManager?.config?.notifications
+                    )
+                }
+                if oldStatus == nil && session.status != "starting" {
+                    notificationManager?.postStatusChange(
+                        session: session,
+                        oldStatus: "",
+                        newStatus: session.status,
+                        config: configManager?.config?.notifications
+                    )
+                }
+            }
+        }
+
+        // Update lastKnownStatus
+        lastKnownStatus = [:]
+        for session in loaded {
+            lastKnownStatus[session.session_id] = session.status
+        }
+        isFirstPoll = false
 
         DispatchQueue.main.async {
             self.sessions = loaded
@@ -1145,6 +1198,22 @@ struct SettingsPopover: View {
             }
             .buttonStyle(.plain)
 
+            // Notifications toggle
+            Button {
+                configManager.toggleNotifications()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: configManager.notificationsEnabled ? "bell.badge.fill" : "bell.slash.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(configManager.notificationsEnabled ? .yellow : .gray)
+                    Text(configManager.notificationsEnabled ? "Notifications on" : "Notifications off")
+                        .font(.system(size: 11))
+                        .foregroundColor(configManager.notificationsEnabled ? .white : .white.opacity(0.4))
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+
             if configManager.voiceEnabled {
                 Divider().background(Color.white.opacity(0.1))
 
@@ -1659,6 +1728,109 @@ struct WindowDragHandle: NSViewRepresentable {
     }
 }
 
+// MARK: - Notification Manager
+
+class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+    private var authorized = false
+
+    override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+        requestAuthorization()
+    }
+
+    private func requestAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            DispatchQueue.main.async {
+                self.authorized = granted
+                if let error = error {
+                    NSLog("[ClaudeMonitor] Notification auth error: %@", error.localizedDescription)
+                }
+                NSLog("[ClaudeMonitor] Notification authorization: %@", granted ? "granted" : "denied")
+            }
+        }
+    }
+
+    func postStatusChange(session: SessionInfo, oldStatus: String, newStatus: String, config: MonitorConfig.NotificationConfig?) {
+        guard authorized else { return }
+        guard let config = config, config.enabled else { return }
+
+        switch newStatus {
+        case "starting":  guard config.on_starting else { return }
+        case "working":   guard config.on_working else { return }
+        case "done":      guard config.on_done else { return }
+        case "attention": guard config.on_attention else { return }
+        default: return
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = session.displayName
+        content.subtitle = statusDescription(newStatus)
+        content.sound = .default
+        content.threadIdentifier = session.session_id
+        content.userInfo = [
+            "session_id": session.session_id,
+            "terminal": session.terminal,
+            "terminal_session_id": session.terminal_session_id
+        ]
+
+        let request = UNNotificationRequest(
+            identifier: "\(session.session_id)-\(newStatus)-\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                NSLog("[ClaudeMonitor] Failed to post notification: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    private func statusDescription(_ status: String) -> String {
+        switch status {
+        case "starting":  return "Session started"
+        case "working":   return "Started working"
+        case "done":      return "Finished"
+        case "attention": return "Needs permission"
+        default:          return status
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let userInfo = response.notification.request.content.userInfo
+        guard let sessionId = userInfo["session_id"] as? String,
+              let terminal = userInfo["terminal"] as? String,
+              let terminalSessionId = userInfo["terminal_session_id"] as? String else {
+            completionHandler()
+            return
+        }
+
+        let decoder = JSONDecoder()
+        let json: [String: String] = [
+            "session_id": sessionId,
+            "terminal": terminal,
+            "terminal_session_id": terminalSessionId
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: json),
+           let session = try? decoder.decode(SessionInfo.self, from: data) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                switchToSession(session)
+            }
+        }
+
+        completionHandler()
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1666,11 +1838,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let reader = SessionReader()
     let configManager = ConfigManager()
     var sizeObserver: AnyCancellable?
+    let notificationManager = NotificationManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         reader.setConfigManager(configManager)
+        reader.setNotificationManager(notificationManager)
 
         panel = FloatingPanel()
 
