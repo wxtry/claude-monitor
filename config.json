@@ -30,7 +30,7 @@
   "notifications": {
     "enabled": true,
     "on_starting": false,
-    "on_working": true,
+    "on_working": false,
     "on_done": true,
     "on_attention": true
   }

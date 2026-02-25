@@ -36,6 +36,9 @@ fi
 # Copy Info.plist
 cp "$SCRIPT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
 
+# Ad-hoc sign so macOS recognizes bundle identifier for notifications
+codesign --force --sign - "$APP_DIR"
+
 echo "Build successful: $APP_DIR"
 
 # Kill existing instance if running

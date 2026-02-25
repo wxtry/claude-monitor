@@ -22,5 +22,7 @@
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Claude Monitor needs to control Terminal to switch between sessions.</string>
 </dict>
 </plist>

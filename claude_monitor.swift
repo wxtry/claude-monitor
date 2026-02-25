@@ -778,13 +778,15 @@ func switchToTerminal(ttyPath: String) {
     tell application "Terminal"
         activate
         repeat with w in windows
-            repeat with t in tabs of w
-                if tty of t is "\(ttyPath)" then
-                    set selected tab of w to t
-                    set index of w to 1
-                    return
-                end if
-            end repeat
+            try
+                repeat with t in tabs of w
+                    if tty of t is "\(ttyPath)" then
+                        set selected tab of w to t
+                        set index of w to 1
+                        return
+                    end if
+                end repeat
+            end try
         end repeat
     end tell
     """
@@ -834,11 +836,13 @@ func getTerminalWindowFrame(session: SessionInfo) -> NSRect? {
         script = """
         tell application "Terminal"
             repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "\(ttyPath)" then
-                        return bounds of w
-                    end if
-                end repeat
+                try
+                    repeat with t in tabs of w
+                        if tty of t is "\(ttyPath)" then
+                            return bounds of w
+                        end if
+                    end repeat
+                end try
             end repeat
         end tell
         """
@@ -910,12 +914,14 @@ func moveTerminalWindow(session: SessionInfo, to rect: NSRect) {
         script = """
         tell application "Terminal"
             repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "\(ttyPath)" then
-                        set bounds of w to {\(left), \(top), \(right), \(bottom)}
-                        return
-                    end if
-                end repeat
+                try
+                    repeat with t in tabs of w
+                        if tty of t is "\(ttyPath)" then
+                            set bounds of w to {\(left), \(top), \(right), \(bottom)}
+                            return
+                        end if
+                    end repeat
+                end try
             end repeat
         end tell
         """
@@ -1355,6 +1361,23 @@ struct SettingsPopover: View {
                     }
                 }
             }
+
+            Divider().background(Color.white.opacity(0.1))
+
+            Button {
+                NSApp.terminate(nil)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "power")
+                        .font(.system(size: 10))
+                        .foregroundColor(.red.opacity(0.6))
+                    Text("Quit")
+                        .font(.system(size: 11))
+                        .foregroundColor(.red.opacity(0.6))
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
         }
         .padding(10)
         .frame(width: 200)
@@ -1470,7 +1493,8 @@ struct MonitorContentView: View {
     @ObservedObject var configManager: ConfigManager
     @State private var isExpanded = true
     @AppStorage("monitorWidth") private var panelWidth: Double = 280
-    private let guideAnimator = ClickGuideAnimator()
+    @AppStorage("monitorMaxHeight") private var panelMaxHeight: Double = 300
+    private static let guideAnimator = ClickGuideAnimator()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1487,7 +1511,7 @@ struct MonitorContentView: View {
                             Button {
                                 let mouseLocation = NSEvent.mouseLocation
                                 let sessionCopy = session
-                                let animator = guideAnimator
+                                let animator = Self.guideAnimator
                                 // Sequence AppleScript calls: get frame first, then switch.
                                 // Running them concurrently violates NSAppleScript thread-safety
                                 // and causes silent failures for non-active tabs.
@@ -1518,7 +1542,7 @@ struct MonitorContentView: View {
                     }
                     .background(ScrollbarStyler())
                 }
-                .frame(maxHeight: 300)
+                .frame(maxHeight: panelMaxHeight)
             }
         }
         .frame(width: max(200, min(panelWidth, 600)))
@@ -1528,6 +1552,12 @@ struct MonitorContentView: View {
                 panelWidth = newWidth
             }
             .frame(width: 6)
+        }
+        .overlay(alignment: .bottom) {
+            VerticalResizeHandle(currentHeight: panelMaxHeight) { newHeight in
+                panelMaxHeight = newHeight
+            }
+            .frame(height: 6)
         }
         .background(
             VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
@@ -1589,6 +1619,62 @@ class ResizeHandleNSView: NSView {
         let delta = NSEvent.mouseLocation.x - dragOriginX
         let newWidth = max(200, min(startWidth + Double(delta), 600))
         onResize?(newWidth)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+    }
+}
+
+struct VerticalResizeHandle: NSViewRepresentable {
+    let currentHeight: Double
+    var onResize: (Double) -> Void
+
+    func makeNSView(context: Context) -> VerticalResizeHandleNSView {
+        let view = VerticalResizeHandleNSView()
+        view.onResize = onResize
+        view.startHeight = currentHeight
+        return view
+    }
+
+    func updateNSView(_ nsView: VerticalResizeHandleNSView, context: Context) {
+        nsView.onResize = onResize
+        if !nsView.isDragging { nsView.startHeight = currentHeight }
+    }
+}
+
+class VerticalResizeHandleNSView: NSView {
+    var onResize: ((Double) -> Void)?
+    var startHeight: Double = 300
+    var isDragging = false
+    private var dragOriginY: CGFloat = 0
+    private var trackingArea: NSTrackingArea?
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 6) }
+
+    override func updateTrackingAreas() {
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(trackingArea!)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func mouseEntered(with event: NSEvent) { NSCursor.resizeUpDown.set() }
+    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        dragOriginY = NSEvent.mouseLocation.y
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // Screen Y is bottom-up; dragging down (negative delta) should increase height
+        let delta = dragOriginY - NSEvent.mouseLocation.y
+        let newHeight = max(100, min(startHeight + Double(delta), 800))
+        onResize?(newHeight)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1753,10 +1839,6 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             DispatchQueue.main.async {
                 self.authorized = granted
-                if let error = error {
-                    NSLog("[ClaudeMonitor] Notification auth error: %@", error.localizedDescription)
-                }
-                NSLog("[ClaudeMonitor] Notification authorization: %@", granted ? "granted" : "denied")
             }
         }
     }
@@ -1790,11 +1872,7 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             trigger: nil
         )
 
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                NSLog("[ClaudeMonitor] Failed to post notification: %@", error.localizedDescription)
-            }
-        }
+        UNUserNotificationCenter.current().add(request)
     }
 
     private func statusDescription(_ status: String) -> String {
@@ -1849,6 +1927,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let configManager = ConfigManager()
     var sizeObserver: AnyCancellable?
     let notificationManager = NotificationManager()
+    private var dragStartLocation: NSPoint?
+    private var dragStartOrigin: NSPoint?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -1893,6 +1973,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.panel.savePosition()
+        }
+
+        // Window drag via local event monitor (doesn't interfere with SwiftUI buttons)
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            if event.window === self?.panel {
+                self?.dragStartLocation = NSEvent.mouseLocation
+                self?.dragStartOrigin = self?.panel.frame.origin
+            }
+            return event
+        }
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) { [weak self] event in
+            guard event.window === self?.panel,
+                  let start = self?.dragStartLocation,
+                  let origin = self?.dragStartOrigin else { return event }
+            let current = NSEvent.mouseLocation
+            let dx = current.x - start.x
+            let dy = current.y - start.y
+            if abs(dx) > 3 || abs(dy) > 3 {
+                self?.panel.setFrameOrigin(NSPoint(x: origin.x + dx, y: origin.y + dy))
+            }
+            return event
+        }
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            self?.dragStartLocation = nil
+            self?.dragStartOrigin = nil
+            return event
+        }
+
+        // Cmd+Q to quit
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "q" {
+                NSApp.terminate(nil)
+                return nil
+            }
+            return event
         }
     }
 }
