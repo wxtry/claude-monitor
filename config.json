@@ -26,5 +26,12 @@
     "model": "gemini-2.0-flash",
     "threshold_chars": 4000,
     "proxy": ""
+  },
+  "notifications": {
+    "enabled": true,
+    "on_starting": false,
+    "on_working": true,
+    "on_done": true,
+    "on_attention": true
   }
 }

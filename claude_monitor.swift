@@ -64,6 +64,14 @@ struct MonitorConfig: Codable {
         var threshold_chars: Int
     }
     var summary: SummaryConfig?
+    struct NotificationConfig: Codable {
+        var enabled: Bool
+        var on_starting: Bool
+        var on_working: Bool
+        var on_done: Bool
+        var on_attention: Bool
+    }
+    var notifications: NotificationConfig?
 }
 
 // MARK: - ElevenLabs Voice Info
@@ -696,6 +704,7 @@ func switchToITerm2(sessionId: String) {
                 repeat with s in sessions of t
                     if unique id of s is "\(uniqueId)" then
                         select t
+                        set index of w to 1
                         return
                     end if
                 end repeat
@@ -1410,6 +1419,9 @@ struct MonitorContentView: View {
                                 let mouseLocation = NSEvent.mouseLocation
                                 let sessionCopy = session
                                 let animator = guideAnimator
+                                // Sequence AppleScript calls: get frame first, then switch.
+                                // Running them concurrently violates NSAppleScript thread-safety
+                                // and causes silent failures for non-active tabs.
                                 DispatchQueue.global(qos: .userInitiated).async {
                                     let targetFrame = getTerminalWindowFrame(session: sessionCopy)
                                     DispatchQueue.main.async {
@@ -1420,9 +1432,9 @@ struct MonitorContentView: View {
                                                 color: sessionCopy.statusNSColor
                                             )
                                         }
+                                        switchToSession(sessionCopy)
                                     }
                                 }
-                                switchToSession(session)
                             } label: {
                                 SessionRowView(session: session, isSummarizing: reader.summarizeInFlight.contains(session.session_id), onKill: { killSession(session) })
                                     .contentShape(Rectangle())
