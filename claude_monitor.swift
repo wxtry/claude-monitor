@@ -444,8 +444,8 @@ class SessionReader: ObservableObject {
     // Cache: sessions-index.json summaries per project [encodedPath: [sessionId: summary]]
     private var claudeIndexCache: [String: [String: String]] = [:]
     private var claudeIndexLastRead: [String: Date] = [:]
-    // Cache: custom-title per project [encodedPath: [jsonlSessionId: customTitle]]
-    private var customTitleCache: [String: [String: String]] = [:]
+    // Cache: custom-title per project cwd [cwd: [jsonlSessionId: CustomTitleInfo]]
+    private var customTitleCache: [String: [String: CustomTitleInfo]] = [:]
     private var customTitleLastRead: [String: Date] = [:]
 
     func setConfigManager(_ cm: ConfigManager) {
@@ -463,19 +463,25 @@ class SessionReader: ObservableObject {
                   .replacingOccurrences(of: "_", with: "-")
     }
 
-    /// Read Claude's sessions-index.json for a given project cwd, with caching (refresh every 30s)
+    /// Read Claude's sessions-index.json for a given project cwd, with caching (refresh every 30s).
+    /// Tries parent directories if exact match not found.
     private func readClaudeIndex(forCwd cwd: String) -> [String: String] {
-        let encoded = encodeCwdToProjectDir(cwd)
-        if let lastRead = claudeIndexLastRead[encoded],
+        let cacheKey = cwd
+        if let lastRead = claudeIndexLastRead[cacheKey],
            Date().timeIntervalSince(lastRead) < 30,
-           let cached = claudeIndexCache[encoded] {
+           let cached = claudeIndexCache[cacheKey] {
             return cached
         }
 
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let indexPath = "\(home)/.claude/projects/\(encoded)/sessions-index.json"
+        guard let projectDir = findClaudeProjectDir(forCwd: cwd) else {
+            claudeIndexCache[cacheKey] = [:]
+            claudeIndexLastRead[cacheKey] = Date()
+            return [:]
+        }
+
+        let indexPath = "\(projectDir)/sessions-index.json"
         guard let data = FileManager.default.contents(atPath: indexPath) else {
-            return claudeIndexCache[encoded] ?? [:]
+            return claudeIndexCache[cacheKey] ?? [:]
         }
 
         do {
@@ -488,33 +494,61 @@ class SessionReader: ObservableObject {
                     result[sid] = summary
                 }
             }
-            claudeIndexCache[encoded] = result
-            claudeIndexLastRead[encoded] = Date()
+            claudeIndexCache[cacheKey] = result
+            claudeIndexLastRead[cacheKey] = Date()
             return result
         } catch {
             NSLog("[ClaudeMonitor] Failed to read sessions-index for %@: %@", cwd, error.localizedDescription)
-            return claudeIndexCache[encoded] ?? [:]
+            return claudeIndexCache[cacheKey] ?? [:]
         }
     }
 
+    /// Find the Claude projects directory for a cwd, trying parent paths if exact match not found.
+    /// Claude stores JSONLs under the cwd where the session was started, which may be a parent of session.cwd.
+    private func findClaudeProjectDir(forCwd cwd: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fm = FileManager.default
+        var path = cwd
+        while !path.isEmpty && path != "/" {
+            let encoded = encodeCwdToProjectDir(path)
+            let dir = "\(home)/.claude/projects/\(encoded)"
+            if fm.fileExists(atPath: dir) {
+                return dir
+            }
+            // Try parent
+            path = (path as NSString).deletingLastPathComponent
+        }
+        return nil
+    }
+
+    /// Custom title info: title and the JSONL file's modification date (for recency matching)
+    struct CustomTitleInfo {
+        let title: String
+        let fileMtime: Date
+    }
+
     /// Read custom-title entries from all JSONL files in a project directory, cached with 10s TTL.
-    /// Returns map of [jsonlSessionId: customTitle] for all sessions that have been renamed.
-    private func readCustomTitles(forCwd cwd: String) -> [String: String] {
-        let encoded = encodeCwdToProjectDir(cwd)
-        if let lastRead = customTitleLastRead[encoded],
+    /// Returns map of [jsonlSessionId: CustomTitleInfo] for all sessions that have been renamed.
+    private func readCustomTitles(forCwd cwd: String) -> [String: CustomTitleInfo] {
+        let cacheKey = cwd
+        if let lastRead = customTitleLastRead[cacheKey],
            Date().timeIntervalSince(lastRead) < 10,
-           let cached = customTitleCache[encoded] {
+           let cached = customTitleCache[cacheKey] {
             return cached
         }
 
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let projectDir = "\(home)/.claude/projects/\(encoded)"
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: projectDir) else {
-            return customTitleCache[encoded] ?? [:]
+        guard let projectDir = findClaudeProjectDir(forCwd: cwd) else {
+            customTitleCache[cacheKey] = [:]
+            customTitleLastRead[cacheKey] = Date()
+            return [:]
         }
 
-        var result: [String: String] = [:]
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: projectDir) else {
+            return customTitleCache[cacheKey] ?? [:]
+        }
+
+        var result: [String: CustomTitleInfo] = [:]
         let customTitleTag = "\"custom-title\""
 
         for file in files where file.hasSuffix(".jsonl") {
@@ -522,8 +556,11 @@ class SessionReader: ObservableObject {
             guard let data = fm.contents(atPath: filePath),
                   let content = String(data: data, encoding: .utf8) else { continue }
 
-            // Quick check: does the file contain custom-title at all?
             guard content.contains(customTitleTag) else { continue }
+
+            // Get file mtime for recency matching
+            let attrs = try? fm.attributesOfItem(atPath: filePath)
+            let mtime = (attrs?[.modificationDate] as? Date) ?? .distantPast
 
             for line in content.components(separatedBy: "\n") where !line.isEmpty {
                 guard line.contains(customTitleTag) else { continue }
@@ -532,12 +569,12 @@ class SessionReader: ObservableObject {
                       json["type"] as? String == "custom-title",
                       let title = json["customTitle"] as? String, !title.isEmpty,
                       let sid = json["sessionId"] as? String else { continue }
-                result[sid] = title
+                result[sid] = CustomTitleInfo(title: title, fileMtime: mtime)
             }
         }
 
-        customTitleCache[encoded] = result
-        customTitleLastRead[encoded] = Date()
+        customTitleCache[cacheKey] = result
+        customTitleLastRead[cacheKey] = Date()
         return result
     }
 
@@ -635,20 +672,26 @@ class SessionReader: ObservableObject {
 
         // Populate renamed_title (from custom-title in JSONL) and claude_summary (from sessions-index.json)
         var claudeIndexes: [String: [String: String]] = [:]
-        var customTitles: [String: [String: String]] = [:]
+        var customTitles: [String: [String: CustomTitleInfo]] = [:]
         for cwd in cwdSet {
             claudeIndexes[cwd] = readClaudeIndex(forCwd: cwd)
             customTitles[cwd] = readCustomTitles(forCwd: cwd)
         }
         for i in loaded.indices {
             let session = loaded[i]
-            // Check for custom-title (from /rename) — try direct session_id match first,
-            // then match any session in the same project (monitor session_id may differ from JSONL session_id)
+            // Check for custom-title (from /rename):
+            // 1. Direct session_id match
+            // 2. Single title in project → assume it's this session
+            // 3. Multiple titles → use the most recently modified JSONL's title
             if let titles = customTitles[session.cwd], !titles.isEmpty {
-                if let title = titles[session.session_id] {
-                    loaded[i].renamed_title = title
-                } else if titles.count == 1, let title = titles.values.first {
-                    loaded[i].renamed_title = title
+                if let info = titles[session.session_id] {
+                    loaded[i].renamed_title = info.title
+                } else {
+                    // No direct match — pick the most recently modified JSONL's custom-title
+                    let mostRecent = titles.values.max(by: { $0.fileMtime < $1.fileMtime })
+                    if let info = mostRecent {
+                        loaded[i].renamed_title = info.title
+                    }
                 }
             }
             // Get Claude auto-summary from sessions-index.json
