@@ -444,9 +444,9 @@ class SessionReader: ObservableObject {
     // Cache: sessions-index.json summaries per project [encodedPath: [sessionId: summary]]
     private var claudeIndexCache: [String: [String: String]] = [:]
     private var claudeIndexLastRead: [String: Date] = [:]
-    // Cache: /rename titles per session [sessionId: renamedTitle]
-    private var renameCache: [String: String] = [:]
-    private var renameChecked: [String: TimeInterval] = [:]  // sessionId -> JSONL file mtime when last checked
+    // Cache: custom-title per project [encodedPath: [jsonlSessionId: customTitle]]
+    private var customTitleCache: [String: [String: String]] = [:]
+    private var customTitleLastRead: [String: Date] = [:]
 
     func setConfigManager(_ cm: ConfigManager) {
         self.configManager = cm
@@ -497,54 +497,48 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Detect /rename title from a Claude session JSONL file (reads tail, cached by mtime)
-    private func detectRenameTitle(sessionId: String, cwd: String) -> String? {
+    /// Read custom-title entries from all JSONL files in a project directory, cached with 10s TTL.
+    /// Returns map of [jsonlSessionId: customTitle] for all sessions that have been renamed.
+    private func readCustomTitles(forCwd cwd: String) -> [String: String] {
         let encoded = encodeCwdToProjectDir(cwd)
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let jsonlPath = "\(home)/.claude/projects/\(encoded)/\(sessionId).jsonl"
-
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: jsonlPath) else { return renameCache[sessionId] }
-
-        // Check mtime to avoid re-scanning unchanged files
-        let attrs = try? fm.attributesOfItem(atPath: jsonlPath)
-        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        if let lastMtime = renameChecked[sessionId], lastMtime == mtime {
-            return renameCache[sessionId]
+        if let lastRead = customTitleLastRead[encoded],
+           Date().timeIntervalSince(lastRead) < 10,
+           let cached = customTitleCache[encoded] {
+            return cached
         }
-        renameChecked[sessionId] = mtime
 
-        // Read JSONL, parse each line as JSON, find /rename commands in user messages
-        guard let data = fm.contents(atPath: jsonlPath),
-              let content = String(data: data, encoding: .utf8) else { return renameCache[sessionId] }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let projectDir = "\(home)/.claude/projects/\(encoded)"
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: projectDir) else {
+            return customTitleCache[encoded] ?? [:]
+        }
 
-        var lastRenameName: String? = nil
-        let renameTag = "<command-name>/rename</command-name>"
-        let argsOpen = "<command-args>"
-        let argsClose = "</command-args>"
+        var result: [String: String] = [:]
+        let customTitleTag = "\"custom-title\""
 
-        for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            // Quick pre-filter before JSON parsing
-            guard line.contains(renameTag) else { continue }
-            // Parse JSON to ensure this is a user message (not code/output containing the pattern)
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  json["type"] as? String == "user",
-                  let message = json["message"] as? [String: Any],
-                  let msgContent = message["content"] as? String,
-                  msgContent.contains(renameTag) else { continue }
-            // Extract rename args from the message content
-            if let argsStart = msgContent.range(of: argsOpen),
-               let argsEnd = msgContent.range(of: argsClose, range: argsStart.upperBound..<msgContent.endIndex) {
-                let name = String(msgContent[argsStart.upperBound..<argsEnd.lowerBound]).trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty {
-                    lastRenameName = name
-                }
+        for file in files where file.hasSuffix(".jsonl") {
+            let filePath = "\(projectDir)/\(file)"
+            guard let data = fm.contents(atPath: filePath),
+                  let content = String(data: data, encoding: .utf8) else { continue }
+
+            // Quick check: does the file contain custom-title at all?
+            guard content.contains(customTitleTag) else { continue }
+
+            for line in content.components(separatedBy: "\n") where !line.isEmpty {
+                guard line.contains(customTitleTag) else { continue }
+                guard let lineData = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                      json["type"] as? String == "custom-title",
+                      let title = json["customTitle"] as? String, !title.isEmpty,
+                      let sid = json["sessionId"] as? String else { continue }
+                result[sid] = title
             }
         }
 
-        renameCache[sessionId] = lastRenameName
-        return lastRenameName
+        customTitleCache[encoded] = result
+        customTitleLastRead[encoded] = Date()
+        return result
     }
 
     init() {
@@ -639,23 +633,36 @@ class SessionReader: ObservableObject {
             }
         }
 
-        // Populate renamed_title (from /rename in JSONL) and claude_summary (from sessions-index.json)
+        // Populate renamed_title (from custom-title in JSONL) and claude_summary (from sessions-index.json)
         var claudeIndexes: [String: [String: String]] = [:]
+        var customTitles: [String: [String: String]] = [:]
         for cwd in cwdSet {
             claudeIndexes[cwd] = readClaudeIndex(forCwd: cwd)
+            customTitles[cwd] = readCustomTitles(forCwd: cwd)
         }
         for i in loaded.indices {
             let session = loaded[i]
-            // Check for /rename title in JSONL
-            if !session.cwd.isEmpty {
-                if let renamedTitle = detectRenameTitle(sessionId: session.session_id, cwd: session.cwd) {
-                    loaded[i].renamed_title = renamedTitle
+            // Check for custom-title (from /rename) — try direct session_id match first,
+            // then match any session in the same project (monitor session_id may differ from JSONL session_id)
+            if let titles = customTitles[session.cwd], !titles.isEmpty {
+                if let title = titles[session.session_id] {
+                    loaded[i].renamed_title = title
+                } else if titles.count == 1, let title = titles.values.first {
+                    loaded[i].renamed_title = title
                 }
             }
             // Get Claude auto-summary from sessions-index.json
-            if let index = claudeIndexes[session.cwd],
-               let summary = index[session.session_id], !summary.isEmpty {
-                loaded[i].claude_summary = summary
+            if let index = claudeIndexes[session.cwd] {
+                // Try direct match first
+                if let summary = index[session.session_id], !summary.isEmpty {
+                    loaded[i].claude_summary = summary
+                } else if loaded[i].claude_summary.isEmpty {
+                    // If no direct match, find any summary for this project (heuristic for ID mismatch)
+                    for (_, summary) in index where !summary.isEmpty {
+                        loaded[i].claude_summary = summary
+                        break
+                    }
+                }
             }
         }
 
@@ -667,8 +674,6 @@ class SessionReader: ObservableObject {
             titleGenerated.remove(key)
             summarizeInFlight.remove(key)
             lastKnownStatus.removeValue(forKey: key)
-            renameCache.removeValue(forKey: key)
-            renameChecked.removeValue(forKey: key)
         }
 
         // Sort: attention first, then working, then starting, then done
