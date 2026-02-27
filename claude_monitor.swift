@@ -2049,7 +2049,7 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = session.displayName
+        content.title = "\(statusEmoji(newStatus)) \(session.displayName)"
         content.subtitle = statusDescription(newStatus)
         content.sound = .default
         content.threadIdentifier = session.session_id
@@ -2059,6 +2059,17 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             "terminal_session_id": session.terminal_session_id
         ]
 
+        // Body: project, elapsed time, last prompt
+        var bodyParts: [String] = []
+        bodyParts.append("Project: \(session.project)")
+        if !session.elapsedString.isEmpty {
+            bodyParts.append("Elapsed: \(session.elapsedString)")
+        }
+        if !session.last_prompt.isEmpty {
+            bodyParts.append("Last: \(session.last_prompt)")
+        }
+        content.body = bodyParts.joined(separator: "\n")
+
         let request = UNNotificationRequest(
             identifier: "\(session.session_id)-\(newStatus)-\(Date().timeIntervalSince1970)",
             content: content,
@@ -2066,6 +2077,16 @@ class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         )
 
         UNUserNotificationCenter.current().add(request)
+    }
+
+    private func statusEmoji(_ status: String) -> String {
+        switch status {
+        case "starting":  return "⏳"
+        case "working":   return "🔵"
+        case "done":      return "✅"
+        case "attention": return "🔔"
+        default:          return "⚪"
+        }
     }
 
     private func statusDescription(_ status: String) -> String {
@@ -2520,6 +2541,11 @@ class ClickGuideAnimator {
 struct ClaudeMonitorApp {
     static func main() {
         let app = NSApplication.shared
+        // Set app icon programmatically to ensure notifications pick it up
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            app.applicationIconImage = icon
+        }
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()

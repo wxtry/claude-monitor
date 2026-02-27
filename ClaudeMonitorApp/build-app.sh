@@ -33,8 +33,11 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Copy Info.plist
+# Copy Info.plist and app icon
 cp "$SCRIPT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
+RESOURCES_DIR="$APP_DIR/Contents/Resources"
+mkdir -p "$RESOURCES_DIR"
+cp "$SCRIPT_DIR/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 
 # Ad-hoc sign so macOS recognizes bundle identifier for notifications
 codesign --force --sign - "$APP_DIR"
