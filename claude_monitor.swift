@@ -424,8 +424,25 @@ struct SessionInfo: Codable, Identifiable {
 
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
+    @Published var foldedSessionIds: Set<String> = []
     private var timer: Timer?
     private var livenessTimer: Timer?
+
+    var visibleSessions: [SessionInfo] {
+        sessions.filter { !foldedSessionIds.contains($0.session_id) }
+    }
+
+    var foldedSessions: [SessionInfo] {
+        sessions.filter { foldedSessionIds.contains($0.session_id) }
+    }
+
+    func foldSession(_ id: String) {
+        foldedSessionIds.insert(id)
+    }
+
+    func unfoldSession(_ id: String) {
+        foldedSessionIds.remove(id)
+    }
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -468,7 +485,7 @@ class SessionReader: ObservableObject {
     private func readClaudeIndex(forCwd cwd: String) -> [String: String] {
         let cacheKey = cwd
         if let lastRead = claudeIndexLastRead[cacheKey],
-           Date().timeIntervalSince(lastRead) < 30,
+           Date().timeIntervalSince(lastRead) < 120,
            let cached = claudeIndexCache[cacheKey] {
             return cached
         }
@@ -532,7 +549,7 @@ class SessionReader: ObservableObject {
     private func readCustomTitles(forCwd cwd: String) -> [String: CustomTitleInfo] {
         let cacheKey = cwd
         if let lastRead = customTitleLastRead[cacheKey],
-           Date().timeIntervalSince(lastRead) < 10,
+           Date().timeIntervalSince(lastRead) < 60,
            let cached = customTitleCache[cacheKey] {
             return cached
         }
@@ -568,6 +585,7 @@ class SessionReader: ObservableObject {
                       let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                       json["type"] as? String == "custom-title",
                       let title = json["customTitle"] as? String, !title.isEmpty,
+                      !title.hasPrefix("<local-command"),
                       let sid = json["sessionId"] as? String else { continue }
                 result[sid] = CustomTitleInfo(title: title, fileMtime: mtime)
             }
@@ -578,12 +596,16 @@ class SessionReader: ObservableObject {
         return result
     }
 
+    private let ioQueue = DispatchQueue(label: "com.claude.monitor.io", qos: .utility)
+
     init() {
-        readSessions()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.readSessions()
+        ioQueue.async { [weak self] in
+            self?.readSessionsBackground()
         }
-        livenessTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.ioQueue.async { self?.readSessionsBackground() }
+        }
+        livenessTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.pruneDeadSessions()
         }
     }
@@ -638,7 +660,8 @@ class SessionReader: ObservableObject {
         }
     }
 
-    func readSessions() {
+    /// Called from background ioQueue — does all file I/O off main thread
+    func readSessionsBackground() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else {
             DispatchQueue.main.async { self.sessions = [] }
@@ -681,17 +704,12 @@ class SessionReader: ObservableObject {
             let session = loaded[i]
             // Check for custom-title (from /rename):
             // 1. Direct session_id match
-            // 2. Single title in project → assume it's this session
-            // 3. Multiple titles → use the most recently modified JSONL's title
+            // 2. Fallback only if exactly one custom-title in the project
             if let titles = customTitles[session.cwd], !titles.isEmpty {
                 if let info = titles[session.session_id] {
                     loaded[i].renamed_title = info.title
-                } else {
-                    // No direct match — pick the most recently modified JSONL's custom-title
-                    let mostRecent = titles.values.max(by: { $0.fileMtime < $1.fileMtime })
-                    if let info = mostRecent {
-                        loaded[i].renamed_title = info.title
-                    }
+                } else if titles.count == 1, let info = titles.values.first {
+                    loaded[i].renamed_title = info.title
                 }
             }
             // Get Claude auto-summary from sessions-index.json
@@ -717,6 +735,13 @@ class SessionReader: ObservableObject {
             titleGenerated.remove(key)
             summarizeInFlight.remove(key)
             lastKnownStatus.removeValue(forKey: key)
+        }
+        // Clean up folded IDs for sessions that no longer exist
+        let staleFolded = foldedSessionIds.subtracting(activeIds)
+        if !staleFolded.isEmpty {
+            DispatchQueue.main.async {
+                self.foldedSessionIds.subtract(staleFolded)
+            }
         }
 
         // Sort: attention first, then working, then starting, then done
@@ -912,7 +937,9 @@ class SessionReader: ObservableObject {
         """]
         try? task.run()
         task.waitUntilExit()
-        readSessions()
+        ioQueue.async { [weak self] in
+            self?.readSessionsBackground()
+        }
     }
 }
 
@@ -1166,55 +1193,6 @@ func stackWindows(sessions: [SessionInfo], panelFrame: NSRect, uniformSize: NSSi
     }
 }
 
-// MARK: - Session Killer
-
-func killSession(_ session: SessionInfo) {
-    var ttyName: String?
-
-    if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
-        ttyName = session.terminal_session_id.replacingOccurrences(of: "/dev/", with: "")
-    } else if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
-        let parts = session.terminal_session_id.split(separator: ":")
-        if parts.count >= 2 {
-            let uniqueId = String(parts[1])
-            let script = """
-            tell application "iTerm2"
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        repeat with s in sessions of t
-                            if unique id of s is "\(uniqueId)" then
-                                return tty of s
-                            end if
-                        end repeat
-                    end repeat
-                end repeat
-            end tell
-            """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                let result = appleScript.executeAndReturnError(&error)
-                if let tty = result.stringValue {
-                    ttyName = tty.replacingOccurrences(of: "/dev/", with: "")
-                }
-            }
-        }
-    }
-
-    if let tty = ttyName {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "pkill -TERM -t \(tty) -f claude 2>/dev/null"]
-        try? task.run()
-    }
-
-    // Clean up session file after delay
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let sessionFile = "\(home)/.claude/monitor/sessions/\(session.session_id).json"
-    DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-        try? FileManager.default.removeItem(atPath: sessionFile)
-    }
-}
-
 // MARK: - Pulsing Dot View
 
 struct PulsingDot: View {
@@ -1266,14 +1244,51 @@ struct SpinnerView: View {
     }
 }
 
+// MARK: - Fold Divider Bar
+
+struct FoldDividerBar: View {
+    let count: Int
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isExpanded.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.3))
+                Text("\(count) hidden")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.white.opacity(0.3))
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.3))
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Session Row View
 
 struct SessionRowView: View {
     let session: SessionInfo
     var isSummarizing: Bool = false
-    var onKill: (() -> Void)? = nil
+    var onDismiss: (() -> Void)? = nil
+    var onRestore: (() -> Void)? = nil
     @State private var isHovered = false
-    @State private var isKilling = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1305,21 +1320,30 @@ struct SessionRowView: View {
 
                     Spacer()
 
-                    if onKill != nil {
+                    if onRestore != nil || onDismiss != nil {
                         ZStack {
-                            if isKilling {
-                                PulsingDot(color: .red, isPulsing: true)
-                            } else if isHovered {
-                                Button {
-                                    isKilling = true
-                                    onKill?()
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 9, weight: .semibold))
-                                        .foregroundColor(.white.opacity(0.35))
-                                        .contentShape(Rectangle())
+                            if isHovered {
+                                if let onRestore = onRestore {
+                                    Button {
+                                        onRestore()
+                                    } label: {
+                                        Image(systemName: "arrow.uturn.backward")
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .foregroundColor(.white.opacity(0.35))
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                } else if let onDismiss = onDismiss {
+                                    Button {
+                                        onDismiss()
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .foregroundColor(.white.opacity(0.35))
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                         .frame(width: 28, height: 28)
@@ -1362,8 +1386,10 @@ struct SettingsPopover: View {
         VStack(alignment: .leading, spacing: 8) {
             // Refresh sessions
             Button {
-                sessionReader?.discoverSessions()
-                sessionReader?.regenerateTitles()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    sessionReader?.discoverSessions()
+                    sessionReader?.regenerateTitles()
+                }
                 refreshed = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { refreshed = false }
             } label: {
@@ -1685,14 +1711,45 @@ struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var configManager: ConfigManager
     @State private var isExpanded = true
+    @State private var isFoldExpanded = false
     @AppStorage("monitorWidth") private var panelWidth: Double = 280
     @AppStorage("monitorMaxHeight") private var panelMaxHeight: Double = 300
     private static let guideAnimator = ClickGuideAnimator()
 
+    private func sessionButton(for session: SessionInfo, onDismiss: (() -> Void)? = nil, onRestore: (() -> Void)? = nil) -> some View {
+        Button {
+            let mouseLocation = NSEvent.mouseLocation
+            let sessionCopy = session
+            let animator = Self.guideAnimator
+            DispatchQueue.global(qos: .userInitiated).async {
+                let targetFrame = getTerminalWindowFrame(session: sessionCopy)
+                DispatchQueue.main.async {
+                    if let frame = targetFrame {
+                        animator.animate(
+                            from: mouseLocation,
+                            to: frame,
+                            color: sessionCopy.statusNSColor
+                        )
+                    }
+                }
+                switchToSession(sessionCopy)
+            }
+        } label: {
+            SessionRowView(
+                session: session,
+                isSummarizing: reader.summarizeInFlight.contains(session.session_id),
+                onDismiss: onDismiss,
+                onRestore: onRestore
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header — always visible, drag to move
-            HeaderBar(sessions: reader.sessions, configManager: configManager, sessionReader: reader)
+            HeaderBar(sessions: reader.visibleSessions, configManager: configManager, sessionReader: reader)
 
             if isExpanded && !reader.sessions.isEmpty {
                 Divider()
@@ -1700,36 +1757,39 @@ struct MonitorContentView: View {
 
                 ScrollView {
                     VStack(spacing: 0) {
-                        ForEach(reader.sessions) { session in
-                            Button {
-                                let mouseLocation = NSEvent.mouseLocation
-                                let sessionCopy = session
-                                let animator = Self.guideAnimator
-                                // Sequence AppleScript calls: get frame first, then switch.
-                                // Running them concurrently violates NSAppleScript thread-safety
-                                // and causes silent failures for non-active tabs.
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    let targetFrame = getTerminalWindowFrame(session: sessionCopy)
-                                    DispatchQueue.main.async {
-                                        if let frame = targetFrame {
-                                            animator.animate(
-                                                from: mouseLocation,
-                                                to: frame,
-                                                color: sessionCopy.statusNSColor
-                                            )
-                                        }
-                                        switchToSession(sessionCopy)
-                                    }
+                        // Visible sessions
+                        ForEach(reader.visibleSessions) { session in
+                            sessionButton(for: session, onDismiss: {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    reader.foldSession(session.session_id)
                                 }
-                            } label: {
-                                SessionRowView(session: session, isSummarizing: reader.summarizeInFlight.contains(session.session_id), onKill: { killSession(session) })
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            if session.id != reader.sessions.last?.id {
+                            })
+                            if session.id != reader.visibleSessions.last?.id || !reader.foldedSessions.isEmpty {
                                 Divider()
                                     .background(Color.white.opacity(0.05))
                                     .padding(.horizontal, 12)
+                            }
+                        }
+
+                        // Fold divider bar
+                        if !reader.foldedSessions.isEmpty {
+                            FoldDividerBar(count: reader.foldedSessions.count, isExpanded: $isFoldExpanded)
+
+                            // Folded sessions (expanded)
+                            if isFoldExpanded {
+                                ForEach(reader.foldedSessions) { session in
+                                    sessionButton(for: session, onRestore: {
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            reader.unfoldSession(session.session_id)
+                                        }
+                                    })
+                                    .opacity(0.6)
+                                    if session.id != reader.foldedSessions.last?.id {
+                                        Divider()
+                                            .background(Color.white.opacity(0.05))
+                                            .padding(.horizontal, 12)
+                                    }
+                                }
                             }
                         }
                     }
