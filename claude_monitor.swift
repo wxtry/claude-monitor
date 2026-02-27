@@ -2021,6 +2021,7 @@ class FloatingPanel: NSPanel {
 
         self.level = .floating
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.hidesOnDeactivate = false
         self.isOpaque = false
         self.backgroundColor = .clear
         self.hasShadow = false
