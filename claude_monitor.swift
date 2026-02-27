@@ -315,6 +315,159 @@ class ConfigManager: ObservableObject {
     }
 }
 
+// MARK: - Usage Manager
+
+class UsageManager: ObservableObject {
+    @Published var sevenDayPercent: Double? = nil    // 0-100
+    @Published var sevenDayResetsAt: Date? = nil
+    @Published var apiUnavailable = false
+
+    private var timer: Timer?
+    private let cachePath = (NSString("~/.claude/monitor/usage-cache.json") as NSString).expandingTildeInPath
+    private var lastFetchTime: Date = .distantPast
+    private var lastFetchSuccess = false
+
+    func startPolling() {
+        // Load cache immediately on startup
+        loadCache()
+        // Fetch in background
+        fetchUsage()
+        // Poll every 60 seconds
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.fetchUsage()
+        }
+    }
+
+    private func loadCache() {
+        guard let data = FileManager.default.contents(atPath: cachePath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let timestamp = json["timestamp"] as? Double else { return }
+
+        let cacheDate = Date(timeIntervalSince1970: timestamp)
+        let ttl: TimeInterval = (json["success"] as? Bool == true) ? 60 : 15
+        guard Date().timeIntervalSince(cacheDate) < ttl else { return }
+
+        applyData(json)
+    }
+
+    private func saveCache(_ json: [String: Any], success: Bool) {
+        var cache = json
+        cache["timestamp"] = Date().timeIntervalSince1970
+        cache["success"] = success
+        let dir = (cachePath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: cache) {
+            try? data.write(to: URL(fileURLWithPath: cachePath))
+        }
+    }
+
+    private func applyData(_ json: [String: Any]) {
+        guard let sevenDay = json["seven_day"] as? [String: Any],
+              let utilization = sevenDay["utilization"] as? Double else { return }
+
+        let resetsAtStr = sevenDay["resets_at"] as? String
+        var resetsAt: Date? = nil
+        if let str = resetsAtStr {
+            let fmt = ISO8601DateFormatter()
+            fmt.formatOptions = [.withInternetDateTime]
+            resetsAt = fmt.date(from: str)
+            if resetsAt == nil {
+                fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                resetsAt = fmt.date(from: str)
+            }
+        }
+
+        DispatchQueue.main.async {
+            self.sevenDayPercent = utilization
+            self.sevenDayResetsAt = resetsAt
+            self.apiUnavailable = false
+        }
+    }
+
+    private func readCredentials() -> (accessToken: String, subscriptionType: String)? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        task.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            guard task.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { return nil }
+
+            guard let jsonData = raw.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let oauth = json["claudeAiOauth"] as? [String: Any],
+                  let token = oauth["accessToken"] as? String, !token.isEmpty else { return nil }
+
+            let subType = oauth["subscriptionType"] as? String ?? ""
+            return (token, subType)
+        } catch {
+            return nil
+        }
+    }
+
+    private func fetchUsage() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+
+            guard let creds = self.readCredentials() else {
+                DispatchQueue.main.async { self.apiUnavailable = true }
+                return
+            }
+
+            // Only show for subscription users (not API users)
+            let sub = creds.subscriptionType.lowercased()
+            guard sub.contains("max") || sub.contains("pro") || sub.contains("team") || sub.isEmpty else {
+                DispatchQueue.main.async { self.apiUnavailable = true }
+                return
+            }
+
+            guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            request.timeoutInterval = 10
+
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                guard let self = self else { return }
+
+                guard let data = data,
+                      let httpResp = response as? HTTPURLResponse,
+                      httpResp.statusCode == 200,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    self.saveCache([:], success: false)
+                    DispatchQueue.main.async { self.apiUnavailable = true }
+                    return
+                }
+
+                self.saveCache(json, success: true)
+                self.applyData(json)
+            }.resume()
+        }
+    }
+
+    var resetTimeString: String? {
+        guard let resetsAt = sevenDayResetsAt else { return nil }
+        let remaining = resetsAt.timeIntervalSince(Date())
+        guard remaining > 0 else { return nil }
+
+        let hours = remaining / 3600
+        if hours >= 24 {
+            return "\(Int(hours / 24))d"
+        } else if hours >= 1 {
+            return "\(Int(hours))h"
+        } else {
+            return "\(max(1, Int(remaining / 60)))m"
+        }
+    }
+}
+
 // MARK: - Session Model
 
 struct SessionInfo: Codable, Identifiable {
@@ -1371,6 +1524,58 @@ struct SessionRowView: View {
 
 // MARK: - Header Bar
 
+// MARK: - Usage Pill View
+
+struct UsagePillView: View {
+    let percent: Double
+    let resetTime: String?
+
+    private var tierColor: Color {
+        if percent < 50 { return Color(red: 0.52, green: 0.94, blue: 0.67) }
+        if percent < 75 { return Color(red: 0.99, green: 0.88, blue: 0.28) }
+        if percent < 90 { return Color(red: 0.96, green: 0.62, blue: 0.04) }
+        return Color(red: 0.94, green: 0.27, blue: 0.27)
+    }
+
+    private var fillOpacity: Double {
+        if percent < 50 { return 0.2 }
+        if percent < 75 { return 0.25 }
+        if percent < 90 { return 0.25 }
+        return 0.3
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                // Background
+                Capsule()
+                    .fill(Color.white.opacity(0.06))
+
+                // Fill bar
+                Capsule()
+                    .fill(tierColor.opacity(fillOpacity))
+                    .frame(width: geo.size.width * min(percent / 100, 1.0))
+
+                // Text
+                HStack(spacing: 3) {
+                    Text("\(Int(percent))%")
+                        .foregroundColor(tierColor)
+                    if let resetTime = resetTime {
+                        Text("·")
+                            .foregroundColor(.white.opacity(0.25))
+                        Text(resetTime)
+                            .foregroundColor(.white.opacity(0.45))
+                    }
+                }
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(width: 60, height: 16)
+        .allowsHitTesting(false)
+    }
+}
+
 // MARK: - Settings Popover
 
 struct SettingsPopover: View {
@@ -1609,6 +1814,7 @@ struct SettingsPopover: View {
 struct HeaderBar: View {
     let sessions: [SessionInfo]
     @ObservedObject var configManager: ConfigManager
+    @ObservedObject var usageManager: UsageManager
     var sessionReader: SessionReader?
     @State private var showSettings = false
     @State private var lastStackClickTime: Date = .distantPast
@@ -1619,13 +1825,16 @@ struct HeaderBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Image(systemName: "terminal.fill")
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.6))
                 Text("Claude")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.white.opacity(0.8))
+                if let percent = usageManager.sevenDayPercent {
+                    UsagePillView(percent: percent, resetTime: usageManager.resetTimeString)
+                }
             }
             .allowsHitTesting(false)
 
@@ -1715,6 +1924,7 @@ struct HeaderBar: View {
 struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var configManager: ConfigManager
+    @ObservedObject var usageManager: UsageManager
     @State private var isExpanded = true
     @State private var isFoldExpanded = false
     @AppStorage("monitorWidth") private var panelWidth: Double = 280
@@ -1754,7 +1964,7 @@ struct MonitorContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header — always visible, drag to move
-            HeaderBar(sessions: reader.visibleSessions, configManager: configManager, sessionReader: reader)
+            HeaderBar(sessions: reader.visibleSessions, configManager: configManager, usageManager: usageManager, sessionReader: reader)
 
             if isExpanded && !reader.sessions.isEmpty {
                 Divider()
@@ -2209,6 +2419,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: FloatingPanel!
     let reader = SessionReader()
     let configManager = ConfigManager()
+    let usageManager = UsageManager()
     var sizeObserver: AnyCancellable?
     let notificationManager = NotificationManager()
 
@@ -2217,11 +2428,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         reader.setConfigManager(configManager)
         reader.setNotificationManager(notificationManager)
+        usageManager.startPolling()
 
         panel = FloatingPanel()
 
         let hostingView = ClickHostingView(
-            rootView: MonitorContentView(reader: reader, configManager: configManager)
+            rootView: MonitorContentView(reader: reader, configManager: configManager, usageManager: usageManager)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
