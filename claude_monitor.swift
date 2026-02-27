@@ -1627,38 +1627,42 @@ struct HeaderBar: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.white.opacity(0.8))
             }
+            .allowsHitTesting(false)
 
             Spacer()
 
             HStack(spacing: 8) {
-                if attentionCount > 0 {
-                    HStack(spacing: 3) {
-                        Circle().fill(Color.orange).frame(width: 6, height: 6)
-                        Text("\(attentionCount)")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.orange)
+                HStack(spacing: 8) {
+                    if attentionCount > 0 {
+                        HStack(spacing: 3) {
+                            Circle().fill(Color.orange).frame(width: 6, height: 6)
+                            Text("\(attentionCount)")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.orange)
+                        }
                     }
-                }
-                if workingCount > 0 {
-                    HStack(spacing: 3) {
-                        Circle().fill(Color.cyan).frame(width: 6, height: 6)
-                        Text("\(workingCount)")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.cyan)
+                    if workingCount > 0 {
+                        HStack(spacing: 3) {
+                            Circle().fill(Color.cyan).frame(width: 6, height: 6)
+                            Text("\(workingCount)")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.cyan)
+                        }
                     }
-                }
-                if doneCount > 0 {
-                    HStack(spacing: 3) {
-                        Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text("\(doneCount)")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.green)
+                    if doneCount > 0 {
+                        HStack(spacing: 3) {
+                            Circle().fill(Color.green).frame(width: 6, height: 6)
+                            Text("\(doneCount)")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.green)
+                        }
                     }
-                }
 
-                Text("\(sessions.count)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.4))
+                    Text("\(sessions.count)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+                .allowsHitTesting(false)
 
                 Button {
                     guard let panelFrame = NSApp.windows.first(where: { $0 is FloatingPanel })?.frame else { return }
@@ -1702,6 +1706,7 @@ struct HeaderBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .background(WindowDragHandle())
     }
 }
 
@@ -1846,22 +1851,8 @@ class ResizeHandleNSView: NSView {
     var startWidth: Double = 280
     var isDragging = false
     private var dragOriginX: CGFloat = 0
-    private var trackingArea: NSTrackingArea?
 
     override var intrinsicContentSize: NSSize { NSSize(width: 6, height: NSView.noIntrinsicMetric) }
-
-    override func updateTrackingAreas() {
-        if let ta = trackingArea { removeTrackingArea(ta) }
-        trackingArea = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseEnteredAndExited], owner: self)
-        addTrackingArea(trackingArea!)
-    }
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
-
-    override func mouseEntered(with event: NSEvent) { NSCursor.resizeLeftRight.set() }
-    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 
     override func mouseDown(with event: NSEvent) {
         isDragging = true
@@ -1901,22 +1892,8 @@ class VerticalResizeHandleNSView: NSView {
     var startHeight: Double = 300
     var isDragging = false
     private var dragOriginY: CGFloat = 0
-    private var trackingArea: NSTrackingArea?
 
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 6) }
-
-    override func updateTrackingAreas() {
-        if let ta = trackingArea { removeTrackingArea(ta) }
-        trackingArea = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseEnteredAndExited], owner: self)
-        addTrackingArea(trackingArea!)
-    }
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeUpDown)
-    }
-
-    override func mouseEntered(with event: NSEvent) { NSCursor.resizeUpDown.set() }
-    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 
     override func mouseDown(with event: NSEvent) {
         isDragging = true
@@ -2025,7 +2002,8 @@ class FloatingPanel: NSPanel {
         self.isOpaque = false
         self.backgroundColor = .clear
         self.hasShadow = false
-        self.isMovableByWindowBackground = true
+        self.isMovableByWindowBackground = false
+        self.acceptsMouseMovedEvents = true
         self.ignoresMouseEvents = false
     }
 
@@ -2051,7 +2029,38 @@ class FloatingPanel: NSPanel {
 // MARK: - Click-through Hosting View
 
 class ClickHostingView<Content: View>: NSHostingView<Content> {
+    private var cursorTrackingArea: NSTrackingArea?
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = cursorTrackingArea { removeTrackingArea(ta) }
+        cursorTrackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved],
+            owner: self
+        )
+        addTrackingArea(cursorTrackingArea!)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let loc = event.locationInWindow // origin bottom-left
+        let size = window?.frame.size ?? bounds.size
+        if loc.x >= size.width - 6 {
+            NSCursor.resizeLeftRight.set()
+        } else if loc.y <= 6 {
+            NSCursor.resizeUpDown.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+        super.mouseExited(with: event)
+    }
 }
 
 // MARK: - Window Drag Handle (NSViewRepresentable)
@@ -2202,8 +2211,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let configManager = ConfigManager()
     var sizeObserver: AnyCancellable?
     let notificationManager = NotificationManager()
-    private var dragStartLocation: NSPoint?
-    private var dragStartOrigin: NSPoint?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -2248,32 +2255,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.panel.savePosition()
-        }
-
-        // Window drag via local event monitor (doesn't interfere with SwiftUI buttons)
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            if event.window === self?.panel {
-                self?.dragStartLocation = NSEvent.mouseLocation
-                self?.dragStartOrigin = self?.panel.frame.origin
-            }
-            return event
-        }
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) { [weak self] event in
-            guard event.window === self?.panel,
-                  let start = self?.dragStartLocation,
-                  let origin = self?.dragStartOrigin else { return event }
-            let current = NSEvent.mouseLocation
-            let dx = current.x - start.x
-            let dy = current.y - start.y
-            if abs(dx) > 3 || abs(dy) > 3 {
-                self?.panel.setFrameOrigin(NSPoint(x: origin.x + dx, y: origin.y + dy))
-            }
-            return event
-        }
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
-            self?.dragStartLocation = nil
-            self?.dragStartOrigin = nil
-            return event
         }
 
         // Cmd+Q to quit
