@@ -39,29 +39,41 @@ NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # --- Detect terminal + session ID for click-to-switch ---
 detect_terminal() {
-    local term_app=""
-    local term_session_id=""
-
+    # iTerm2: has dedicated session ID
     if [ -n "${ITERM_SESSION_ID:-}" ]; then
         echo "iterm2|$ITERM_SESSION_ID"
         return
     fi
 
-    # Walk up process tree to find a parent with a real TTY
-    local pid=$$
-    local tty_name=""
-    for _ in 1 2 3 4 5; do
+    # Walk process tree: find TTY + detect terminal app from ancestor process names
+    local pid=$$ tty_name="" term_app="terminal"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
         pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
         [ -z "$pid" ] || [ "$pid" = "1" ] && break
-        tty_name=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-        if [ -n "$tty_name" ] && [ "$tty_name" != "??" ]; then
-            term_app="terminal"
-            term_session_id="/dev/$tty_name"
-            break
+        # Check if ancestor is Ghostty
+        local comm
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+        case "$comm" in *[Gg]hostt*) term_app="ghostty" ;; esac
+        # Grab first real TTY found
+        if [ -z "$tty_name" ] || [ "$tty_name" = "??" ]; then
+            local t
+            t=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+            if [ -n "$t" ] && [ "$t" != "??" ]; then
+                tty_name="$t"
+            fi
         fi
     done
 
-    echo "$term_app|$term_session_id"
+    # Env-var override (in case process tree walk didn't reach Ghostty)
+    if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
+        term_app="ghostty"
+    fi
+
+    if [ -n "$tty_name" ] && [ "$tty_name" != "??" ]; then
+        echo "$term_app|/dev/$tty_name"
+    else
+        echo "$term_app|"
+    fi
 }
 
 # --- TTS announcement ---
@@ -170,7 +182,7 @@ update_session() {
         --arg updated "$NOW" \
         --arg terminal "$TERM_APP" \
         --arg term_sid "$TERM_SID" \
-        '.status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
+        '.status = $status | .updated_at = $updated | .terminal = $terminal | .terminal_session_id = $term_sid' \
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -262,7 +274,7 @@ case "$EVENT" in
                 --arg prompt "$PROMPT_TEXT" \
                 --arg terminal "$TERM_APP" \
                 --arg term_sid "$TERM_SID" \
-                '.status = $status | .updated_at = $updated | .last_prompt = $prompt | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
+                '.status = $status | .updated_at = $updated | .last_prompt = $prompt | .terminal = $terminal | .terminal_session_id = $term_sid' \
                 "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         else
             EXISTING=$(find_existing_session)

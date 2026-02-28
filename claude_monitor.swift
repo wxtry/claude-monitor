@@ -772,7 +772,7 @@ class SessionReader: ObservableObject {
         var ttyMap: [String: [String]] = [:]
         for session in currentSessions {
             guard !session.terminal_session_id.isEmpty else { continue }
-            if session.terminal == "terminal" {
+            if session.terminal == "terminal" || session.terminal == "ghostty" {
                 let ttyName = session.terminal_session_id.replacingOccurrences(of: "/dev/", with: "")
                 ttyMap[ttyName, default: []].append(session.session_id)
             }
@@ -1102,6 +1102,8 @@ func switchToSession(_ session: SessionInfo) {
     NSLog("[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project)")
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
+    } else if session.terminal == "ghostty" {
+        switchToGhostty()
     } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
         switchToTerminal(ttyPath: session.terminal_session_id)
     } else {
@@ -1170,6 +1172,14 @@ func switchToTerminal(ttyPath: String) {
     }
 }
 
+func switchToGhostty() {
+    // Ghostty doesn't have an AppleScript dictionary; activate via NSRunningApplication
+    let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty")
+    if let app = apps.first {
+        app.activate()
+    }
+}
+
 func switchByTerminalCwd(cwd: String) {
     // Fallback: just activate the terminal app
     if let appleScript = NSAppleScript(source: "tell application \"Terminal\" to activate") {
@@ -1219,6 +1229,9 @@ func getTerminalWindowFrame(session: SessionInfo) -> NSRect? {
             end repeat
         end tell
         """
+    } else if session.terminal == "ghostty" {
+        // Ghostty has no AppleScript; use CGWindowList to find its frontmost window
+        return getWindowFrameByBundleId("com.mitchellh.ghostty")
     } else {
         return nil
     }
@@ -1244,6 +1257,32 @@ func getTerminalWindowFrame(session: SessionInfo) -> NSRect? {
     let height = bottom - top
 
     return NSRect(x: x, y: y, width: width, height: height)
+}
+
+/// Get the frontmost normal window frame for an app by bundle identifier, using CGWindowList.
+/// Returns frame in AppKit coordinates (bottom-left origin).
+func getWindowFrameByBundleId(_ bundleId: String) -> NSRect? {
+    guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else { return nil }
+    let pid = app.processIdentifier
+
+    guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+
+    // Find the first on-screen normal window owned by this PID
+    for info in windowList {
+        guard let ownerPID = info[kCGWindowOwnerPID as String] as? Int32, ownerPID == pid,
+              let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+              let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+
+        let cgX = bounds["X"] ?? 0
+        let cgY = bounds["Y"] ?? 0
+        let w = bounds["Width"] ?? 0
+        let h = bounds["Height"] ?? 0
+
+        // Convert from CG coordinates (top-left origin) to AppKit (bottom-left origin)
+        let screenHeight = NSScreen.screens.first?.frame.height ?? 0
+        return NSRect(x: cgX, y: screenHeight - cgY - h, width: w, height: h)
+    }
+    return nil
 }
 
 // MARK: - Terminal Window Mover
